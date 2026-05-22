@@ -74,3 +74,20 @@ Report behavior:
 - The dashboard Excel download now uses two calendar fields: Start Date and End Date.
 - The exported Excel file includes all late/absent records in the selected interval.
 - The Excel file groups entries by each recorded day and includes the day name, date, time, student, grade, section, total late days, and recorded-by user.
+
+
+## Smart AI Chatbot Setup
+
+The chatbot works in two modes:
+
+1. **Local Smart Mode**: works without any API key. It can answer questions about students, risk, grades, reports, users, dates, and simple general questions.
+2. **Full AI Mode**: add `OPENAI_API_KEY` in Render Environment Variables. Then the chatbot can answer general questions much more intelligently and also use the school database context when the question is about lateness or students.
+
+Render Environment Variables to add for Full AI Mode:
+
+```text
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_MODEL=gpt-5.5
+```
+
+If your OpenAI account does not have access to the selected model, change `OPENAI_MODEL` to another model available in your account.

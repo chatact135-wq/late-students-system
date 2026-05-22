@@ -5,12 +5,19 @@ from functools import wraps
 from io import BytesIO
 from email.message import EmailMessage
 import smtplib
+import re
+import calendar
 
 from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 APP_TITLE = "Smart Late Students System"
 DB_PATH = os.environ.get("DB_PATH", "late_students_dynamic.db")
@@ -623,8 +630,13 @@ def grade_number_from_name(name):
 
 def get_ai_risk_report(from_date, to_date):
     """Rule-based AI engine for lateness risk.
-    It detects: high total lateness, consecutive days, and repeated weekday patterns.
-    No paid AI API is required, so it works on Render immediately.
+
+    Important upgrade:
+    - The selected date range is used for the current report totals.
+    - Repeated weekday pattern is checked historically up to the selected To Date,
+      not only inside the selected range. This means if a student was late on a
+      Friday this week and also on a Friday in any previous week, the AI will flag
+      Friday as a repeated pattern even when the current range has only one Friday.
     """
     with get_conn() as conn:
         students = conn.execute("""
@@ -635,6 +647,8 @@ def get_ai_risk_report(from_date, to_date):
             WHERE st.active=1
             ORDER BY g.sort_order, sec.name, st.name
         """).fetchall()
+
+        # Records inside the selected interval: these are the records shown in the report.
         rows = conn.execute("""
             SELECT r.student_id, r.late_date, r.late_time, u.full_name AS recorder_name, u.username AS recorder_username
             FROM late_records r
@@ -643,20 +657,58 @@ def get_ai_risk_report(from_date, to_date):
             ORDER BY r.student_id, r.late_date
         """, (from_date, to_date)).fetchall()
 
+        # Historical records up to the selected To Date: used only for repeated weekday pattern detection.
+        historical_rows = conn.execute("""
+            SELECT r.student_id, r.late_date, r.late_time, u.full_name AS recorder_name, u.username AS recorder_username
+            FROM late_records r
+            LEFT JOIN users u ON u.id=r.recorded_by
+            WHERE r.late_date <= ?
+            ORDER BY r.student_id, r.late_date
+        """, (to_date,)).fetchall()
+
     by_student = {}
     for r in rows:
         by_student.setdefault(r['student_id'], []).append(dict(r))
 
+    historical_by_student = {}
+    for r in historical_rows:
+        historical_by_student.setdefault(r['student_id'], []).append(dict(r))
+
     report = []
     for st in students:
         records = by_student.get(st['id'], [])
+        historical_records = historical_by_student.get(st['id'], [])
+
         dates = sorted({r['late_date'] for r in records})
+        historical_dates = sorted({r['late_date'] for r in historical_records})
         total = len(dates)
-        weekday_counts = {}
+        historical_total = len(historical_dates)
+
+        # Pattern inside the selected interval.
+        interval_weekday_counts = {}
         for d in dates:
             day_name = datetime.strptime(d, "%Y-%m-%d").strftime("%A")
-            weekday_counts[day_name] = weekday_counts.get(day_name, 0) + 1
-        repeated_weekdays = {k: v for k, v in weekday_counts.items() if v >= 2}
+            interval_weekday_counts[day_name] = interval_weekday_counts.get(day_name, 0) + 1
+        repeated_weekdays = {k: v for k, v in interval_weekday_counts.items() if v >= 2}
+
+        # Historical pattern across previous weeks up to To Date.
+        # This is the requested logic: one Tuesday last week + one Tuesday this week = repeated pattern.
+        historical_weekday_dates = {}
+        for d in historical_dates:
+            day_name = datetime.strptime(d, "%Y-%m-%d").strftime("%A")
+            historical_weekday_dates.setdefault(day_name, []).append(d)
+        historical_repeated_weekdays = {
+            day: {
+                "count": len(day_dates),
+                "dates": day_dates,
+                "latest_dates": day_dates[-5:],
+            }
+            for day, day_dates in historical_weekday_dates.items()
+            if len(day_dates) >= 2
+        }
+
+        # Combined pattern shown to the user: historical is more useful, interval is still kept for compatibility.
+        pattern_for_scoring = historical_repeated_weekdays or {k: {"count": v, "dates": [], "latest_dates": []} for k, v in repeated_weekdays.items()}
 
         max_consecutive = 0
         current = 0
@@ -669,6 +721,19 @@ def get_ai_risk_report(from_date, to_date):
                 current = 1
             max_consecutive = max(max_consecutive, current)
             previous_day = current_day
+
+        # Historical consecutive streak is also useful if the selected range is small.
+        historical_max_consecutive = 0
+        historical_current = 0
+        historical_previous_day = None
+        for d in historical_dates:
+            current_day = datetime.strptime(d, "%Y-%m-%d").date()
+            if historical_previous_day and (current_day - historical_previous_day).days == 1:
+                historical_current += 1
+            else:
+                historical_current = 1
+            historical_max_consecutive = max(historical_max_consecutive, historical_current)
+            historical_previous_day = current_day
 
         reasons = []
         score = 0
@@ -684,23 +749,33 @@ def get_ai_risk_report(from_date, to_date):
 
         if max_consecutive >= 2:
             score += 30
-            reasons.append(f"Consecutive lateness detected for {max_consecutive} day(s).")
+            reasons.append(f"Consecutive lateness detected for {max_consecutive} day(s) inside the selected period.")
+        elif historical_max_consecutive >= 2:
+            score += 15
+            reasons.append(f"Historical consecutive lateness detected for {historical_max_consecutive} day(s) up to {to_date}.")
 
-        if repeated_weekdays:
-            score += 25
-            repeated_text = ', '.join([f"{day} ({count} times)" for day, count in repeated_weekdays.items()])
-            reasons.append(f"Repeated weekday pattern: {repeated_text}.")
+        if pattern_for_scoring:
+            score += 30
+            repeated_text = ', '.join([
+                f"{day} ({details['count']} times: {', '.join(details['latest_dates'])})"
+                for day, details in pattern_for_scoring.items()
+            ])
+            reasons.append(f"Repeated weekday pattern detected across weeks: {repeated_text}.")
 
-        if total == 0:
+        if historical_total > 5 and total <= 5:
+            score += 15
+            reasons.append(f"Historical total lateness is above 5 days up to {to_date} ({historical_total}).")
+
+        if total == 0 and historical_total == 0:
             risk = "Low"
             recommendation = "No action required. Continue normal monitoring."
-            reasons.append("No lateness recorded in this period.")
+            reasons.append("No lateness recorded for this student.")
         elif score >= 70:
             risk = "High"
-            recommendation = "Immediate follow-up is recommended. Review morning arrival pattern and assign targeted monitoring."
+            recommendation = "Immediate follow-up is recommended. Review repeated weekday pattern and assign targeted morning monitoring."
         elif score >= 35:
             risk = "Medium"
-            recommendation = "Monitor closely for the next week and remind the student about punctual arrival."
+            recommendation = "Monitor closely for the next week and check whether the repeated weekday pattern continues."
         else:
             risk = "Low"
             recommendation = "Keep monitoring. No urgent intervention is required now."
@@ -711,16 +786,20 @@ def get_ai_risk_report(from_date, to_date):
             "grade_name": st['grade_name'],
             "section_name": st['section_name'],
             "total_late_days": total,
+            "historical_total_late_days": historical_total,
             "max_consecutive": max_consecutive,
+            "historical_max_consecutive": historical_max_consecutive,
             "repeated_weekdays": repeated_weekdays,
+            "historical_repeated_weekdays": historical_repeated_weekdays,
             "risk": risk,
             "score": min(score, 100),
             "reasons": reasons,
             "recommendation": recommendation,
             "records": records,
+            "historical_records": historical_records,
         })
     risk_order = {"High": 0, "Medium": 1, "Low": 2}
-    report.sort(key=lambda x: (risk_order.get(x['risk'], 3), -x['total_late_days'], x['grade_name'], x['section_name'], x['student_name']))
+    report.sort(key=lambda x: (risk_order.get(x['risk'], 3), -x['score'], -x['historical_total_late_days'], -x['total_late_days'], x['grade_name'], x['section_name'], x['student_name']))
     return report
 
 
@@ -761,73 +840,248 @@ def is_arabic(text):
     return any('\u0600' <= ch <= '\u06FF' for ch in text or '')
 
 
-def chatbot_answer(question):
-    q = (question or '').strip()
-    q_low = q.lower()
-    arabic = is_arabic(q)
-    today_iso = date.today().isoformat()
-    default_from = (date.today() - timedelta(days=30)).isoformat()
-    report = get_ai_risk_report(default_from, today_iso)
+def normalize_text(text):
+    text = (text or '').strip().lower()
+    text = re.sub(r'[\u064B-\u065F\u0670]', '', text)
+    return text
 
-    # Find a student name mentioned in the question.
-    mentioned = None
+
+def detect_requested_range(question):
+    q = normalize_text(question)
+    today = date.today()
+    if any(x in q for x in ['today', 'اليوم']):
+        return today.isoformat(), today.isoformat()
+    if any(x in q for x in ['yesterday', 'امس', 'أمس']):
+        d = today - timedelta(days=1)
+        return d.isoformat(), d.isoformat()
+    if any(x in q for x in ['this week', 'الاسبوع', 'الأسبوع', 'هذا الاسبوع', 'هذا الأسبوع']):
+        start = today - timedelta(days=today.weekday())
+        return start.isoformat(), today.isoformat()
+    if any(x in q for x in ['last week', 'الاسبوع الماضي', 'الأسبوع الماضي']):
+        end = today - timedelta(days=today.weekday()+1)
+        start = end - timedelta(days=6)
+        return start.isoformat(), end.isoformat()
+    if any(x in q for x in ['this month', 'الشهر', 'هذا الشهر']):
+        start = today.replace(day=1)
+        return start.isoformat(), today.isoformat()
+    dates = re.findall(r'\d{4}-\d{2}-\d{2}', question or '')
+    if len(dates) >= 2:
+        a, b = dates[0], dates[1]
+        return (a, b) if a <= b else (b, a)
+    if len(dates) == 1:
+        return dates[0], dates[0]
+    return (today - timedelta(days=30)).isoformat(), today.isoformat()
+
+
+def get_system_statistics(from_date, to_date):
+    report = get_ai_risk_report(from_date, to_date)
+    with get_conn() as conn:
+        grade_rows = conn.execute('''
+            SELECT g.name AS grade_name, COUNT(lr.id) AS total_records,
+                   COUNT(DISTINCT lr.student_id) AS unique_students
+            FROM grades g
+            LEFT JOIN students s ON s.grade_id = g.id AND s.active = 1
+            LEFT JOIN late_records lr ON lr.student_id = s.id AND lr.late_date BETWEEN ? AND ?
+            GROUP BY g.id
+            ORDER BY g.sort_order, g.name
+        ''', (from_date, to_date)).fetchall()
+        section_rows = conn.execute('''
+            SELECT g.name AS grade_name, sec.name AS section_name, COUNT(lr.id) AS total_records,
+                   COUNT(DISTINCT lr.student_id) AS unique_students
+            FROM sections sec
+            JOIN grades g ON g.id = sec.grade_id
+            LEFT JOIN students s ON s.section_id = sec.id AND s.active = 1
+            LEFT JOIN late_records lr ON lr.student_id = s.id AND lr.late_date BETWEEN ? AND ?
+            GROUP BY sec.id
+            ORDER BY g.sort_order, sec.name
+        ''', (from_date, to_date)).fetchall()
+        day_rows = conn.execute('''
+            SELECT late_date, COUNT(*) AS total_records
+            FROM late_records
+            WHERE late_date BETWEEN ? AND ?
+            GROUP BY late_date
+            ORDER BY late_date
+        ''', (from_date, to_date)).fetchall()
+        recorder_rows = conn.execute('''
+            SELECT COALESCE(u.full_name, u.username, 'Unknown') AS recorder_name, COUNT(lr.id) AS total_records
+            FROM late_records lr
+            LEFT JOIN users u ON u.id = lr.recorded_by
+            WHERE lr.late_date BETWEEN ? AND ?
+            GROUP BY recorder_name
+            ORDER BY total_records DESC
+        ''', (from_date, to_date)).fetchall()
+    return {
+        'report': report,
+        'grades': [dict(x) for x in grade_rows],
+        'sections': [dict(x) for x in section_rows],
+        'days': [dict(x) for x in day_rows],
+        'recorders': [dict(x) for x in recorder_rows],
+        'total_records': sum(r['total_late_days'] for r in report),
+        'high_risk': sum(1 for r in report if r['risk'] == 'High'),
+        'medium_risk': sum(1 for r in report if r['risk'] == 'Medium'),
+        'low_risk': sum(1 for r in report if r['risk'] == 'Low'),
+    }
+
+
+def format_today_answer(arabic=False):
+    now = datetime.now()
+    en_day = calendar.day_name[now.weekday()]
+    ar_days = {
+        'Monday':'الاثنين', 'Tuesday':'الثلاثاء', 'Wednesday':'الأربعاء',
+        'Thursday':'الخميس', 'Friday':'الجمعة', 'Saturday':'السبت', 'Sunday':'الأحد'
+    }
+    if arabic:
+        return f"اليوم هو {ar_days.get(en_day, en_day)}، التاريخ {now.strftime('%Y-%m-%d')}، والوقت الحالي {now.strftime('%H:%M')} حسب وقت السيرفر."
+    return f"Today is {en_day}, {now.strftime('%Y-%m-%d')}. Current server time is {now.strftime('%H:%M')}."
+
+
+def find_student_in_question(question, report):
+    q_low = normalize_text(question)
+    best = None
+    best_score = 0
     for r in report:
-        if r['student_name'].lower() in q_low:
-            mentioned = r
-            break
-        parts = [p.lower() for p in r['student_name'].split() if len(p) > 2]
-        if parts and any(p in q_low for p in parts):
-            mentioned = r
-            break
+        name = normalize_text(r['student_name'])
+        if not name:
+            continue
+        if name in q_low:
+            return r
+        parts = [p for p in name.split() if len(p) > 2]
+        score = sum(1 for p in parts if p in q_low)
+        if score > best_score:
+            best = r
+            best_score = score
+    return best if best_score >= 1 else None
 
-    def en_student(r):
-        weekdays = ', '.join([f"{d} ({c})" for d, c in r['repeated_weekdays'].items()]) or 'No repeated weekday pattern'
-        reasons = ' '.join(r['reasons'])
-        return (f"{r['student_name']} - {r['grade_name']} {r['section_name']}\n"
-                f"Risk Level: {r['risk']} ({r['score']}/100)\n"
-                f"Total Late Days in last 30 days: {r['total_late_days']}\n"
-                f"Max Consecutive Late Days: {r['max_consecutive']}\n"
-                f"Repeated Weekdays: {weekdays}\n"
-                f"AI Reasons: {reasons}\n"
-                f"Recommendation: {r['recommendation']}")
 
-    def ar_student(r):
+def format_student_answer(r, arabic=False):
+    if r.get('historical_repeated_weekdays'):
+        weekdays = ', '.join([
+            f"{d} ({details['count']} times: {', '.join(details.get('latest_dates', []))})"
+            for d, details in r['historical_repeated_weekdays'].items()
+        ])
+    else:
+        weekdays = ', '.join([f"{d} ({c})" for d, c in r['repeated_weekdays'].items()]) or ('لا يوجد نمط يوم متكرر' if arabic else 'No repeated weekday pattern')
+    recent_records = r.get('records', [])[:10]
+    record_lines = []
+    for rec in recent_records:
+        if arabic:
+            record_lines.append(f"- {rec['late_date']} الساعة {rec['late_time']} بواسطة {rec['recorder_name'] or 'غير معروف'}")
+        else:
+            record_lines.append(f"- {rec['late_date']} at {rec['late_time']} by {rec['recorder_name'] or 'Unknown'}")
+    if arabic:
         risk_ar = {'High': 'مرتفع', 'Medium': 'متوسط', 'Low': 'منخفض'}.get(r['risk'], r['risk'])
-        weekdays = '، '.join([f"{d} ({c})" for d, c in r['repeated_weekdays'].items()]) or 'لا يوجد نمط يوم متكرر'
-        reasons = ' '.join(r['reasons'])
-        return (f"الطالب: {r['student_name']} - {r['grade_name']} {r['section_name']}\n"
+        return (f"الطالب: {r['student_name']}\n"
+                f"الصف/الشعبة: {r['grade_name']} - {r['section_name']}\n"
                 f"مستوى الخطورة: {risk_ar} ({r['score']}/100)\n"
-                f"مجموع أيام التأخير آخر 30 يومًا: {r['total_late_days']}\n"
-                f"أعلى تأخير متتالي: {r['max_consecutive']} يوم\n"
-                f"الأيام المتكررة: {weekdays}\n"
-                f"أسباب التحليل: {reasons}\n"
-                f"التوصية: {r['recommendation']}")
+                f"مجموع أيام التأخير في الفترة المطلوبة: {r['total_late_days']}\n"
+                f"مجموع أيام التأخير التاريخي: {r.get('historical_total_late_days', r['total_late_days'])}\n"
+                f"أعلى تأخير متتالي: {r['max_consecutive']} يوم / تاريخيًا {r.get('historical_max_consecutive', r['max_consecutive'])}\n"
+                f"نمط الأيام المتكررة بين الأسابيع: {weekdays}\n"
+                f"التوصية: {r['recommendation']}\n"
+                f"آخر السجلات:\n" + ('\n'.join(record_lines) if record_lines else 'لا توجد سجلات في هذه الفترة.'))
+    return (f"Student: {r['student_name']}\n"
+            f"Grade/Section: {r['grade_name']} - {r['section_name']}\n"
+            f"Risk Level: {r['risk']} ({r['score']}/100)\n"
+            f"Total late days in the selected period: {r['total_late_days']}\n"
+            f"Historical total late days: {r.get('historical_total_late_days', r['total_late_days'])}\n"
+            f"Maximum consecutive late days: {r['max_consecutive']} / historical {r.get('historical_max_consecutive', r['max_consecutive'])}\n"
+            f"Repeated weekday pattern across weeks: {weekdays}\n"
+            f"Recommendation: {r['recommendation']}\n"
+            f"Recent records:\n" + ('\n'.join(record_lines) if record_lines else 'No records in this period.'))
+
+
+def build_ai_context(question, from_date, to_date):
+    stats = get_system_statistics(from_date, to_date)
+    report = stats['report']
+    mentioned = find_student_in_question(question, report)
+    top_students = [r for r in report if r['total_late_days'] > 0][:12]
+    high = [r for r in report if r['risk'] == 'High'][:12]
+    context_lines = [
+        f"Selected period: {from_date} to {to_date}",
+        f"Total late records: {stats['total_records']}",
+        f"Risk distribution: High={stats['high_risk']}, Medium={stats['medium_risk']}, Low={stats['low_risk']}",
+        "Grade totals: " + '; '.join([f"{g['grade_name']}: {g['total_records']} records, {g['unique_students']} students" for g in stats['grades']]),
+        "Section totals: " + '; '.join([f"{s['grade_name']} {s['section_name']}: {s['total_records']}" for s in stats['sections'] if s['total_records']]),
+        "Daily totals: " + '; '.join([f"{d['late_date']}: {d['total_records']}" for d in stats['days'][:60]]),
+        "Recorded by: " + '; '.join([f"{r['recorder_name']}: {r['total_records']}" for r in stats['recorders']]),
+        "Top late students: " + '; '.join([f"{r['student_name']} ({r['grade_name']} {r['section_name']}): {r['total_late_days']} days, {r['risk']} risk, consecutive {r['max_consecutive']}" for r in top_students]),
+        "High risk students: " + '; '.join([f"{r['student_name']} ({r['total_late_days']} days)" for r in high])
+    ]
+    if mentioned:
+        context_lines.append("Mentioned student details:\n" + format_student_answer(mentioned, arabic=False))
+    return '\n'.join(context_lines), stats, mentioned
+
+
+def openai_smart_answer(question, from_date, to_date):
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key or OpenAI is None:
+        return None
+    context, stats, mentioned = build_ai_context(question, from_date, to_date)
+    model = os.environ.get('OPENAI_MODEL', 'gpt-5.5')
+    client = OpenAI(api_key=api_key)
+    instructions = (
+        "You are a smart bilingual Arabic-English AI assistant inside a school lateness monitoring system. "
+        "Answer naturally in the same language as the user's question. "
+        "Use the provided database context when the question is about students, grades, sections, lateness, risk, users, dates, or reports. "
+        "For general questions not related to the database, answer normally and helpfully. "
+        "Do not invent student records. If the database context does not contain the requested student or data, say that clearly. "
+        "Be concise, professional, and school-administration friendly."
+    )
+    user_input = f"Database context:\n{context}\n\nUser question:\n{question}"
+    response = client.responses.create(model=model, instructions=instructions, input=user_input)
+    return response.output_text
+
+
+def local_smart_answer(question, from_date, to_date):
+    q = (question or '').strip()
+    q_low = normalize_text(q)
+    arabic = is_arabic(q)
+    stats = get_system_statistics(from_date, to_date)
+    report = stats['report']
+    mentioned = find_student_in_question(q, report)
+
+    if any(x in q_low for x in ['what day', 'which day', 'today', 'date', 'time', 'ما هو اليوم', 'ما اليوم', 'اي يوم', 'أي يوم', 'التاريخ', 'الوقت']):
+        return format_today_answer(arabic)
+
+    greetings = ['hello', 'hi', 'مرحبا', 'السلام عليكم', 'هلا', 'اهلا', 'أهلا']
+    if any(g in q_low for g in greetings) and len(q_low) < 40:
+        return 'أهلًا، أنا المساعد الذكي للنظام. اسألني عن الطلاب، التأخير، الخطورة، الصفوف، التقارير، أو التاريخ.' if arabic else 'Hello, I am the smart assistant for this system. Ask me about students, lateness, risk, grades, reports, or dates.'
 
     if mentioned:
-        return ar_student(mentioned) if arabic else en_student(mentioned)
+        return format_student_answer(mentioned, arabic)
 
-    if any(w in q_low for w in ['highest', 'most', 'top', 'أكثر', 'اعلى', 'أعلى']):
-        top = [r for r in report if r['total_late_days'] > 0][:5]
+    if any(w in q_low for w in ['highest', 'most', 'top', 'late the most', 'أكثر', 'اعلى', 'أعلى']):
+        top = [r for r in report if r['total_late_days'] > 0][:10]
         if not top:
-            return 'لا توجد سجلات تأخير خلال آخر 30 يومًا.' if arabic else 'No late records were found in the last 30 days.'
+            return 'لا توجد سجلات تأخير في الفترة المحددة.' if arabic else 'No late records were found in the selected period.'
         if arabic:
-            return 'أكثر الطلاب تأخيرًا آخر 30 يومًا:\n' + '\n'.join([f"- {r['student_name']} | {r['grade_name']} {r['section_name']} | {r['total_late_days']} أيام | خطورة {r['risk']}" for r in top])
-        return 'Top late students in the last 30 days:\n' + '\n'.join([f"- {r['student_name']} | {r['grade_name']} {r['section_name']} | {r['total_late_days']} days | {r['risk']} risk" for r in top])
+            return 'أكثر الطلاب تأخيرًا في الفترة المحددة:\n' + '\n'.join([f"- {r['student_name']} | {r['grade_name']} {r['section_name']} | {r['total_late_days']} أيام | خطورة {r['risk']}" for r in top])
+        return 'Top late students in the selected period:\n' + '\n'.join([f"- {r['student_name']} | {r['grade_name']} {r['section_name']} | {r['total_late_days']} days | {r['risk']} risk" for r in top])
 
-    if any(w in q_low for w in ['risk', 'danger', 'خطورة', 'ريسك', 'خطر']):
+    if any(w in q_low for w in ['risk', 'danger', 'خطورة', 'ريسك', 'خطر', 'high risk', 'عالي الخطورة']):
         high = [r for r in report if r['risk'] == 'High']
         medium = [r for r in report if r['risk'] == 'Medium']
         if arabic:
-            return f"تحليل الخطورة آخر 30 يومًا: مرتفع {len(high)} طالب، متوسط {len(medium)} طالب.\n" + ('الطلاب عالي الخطورة:\n' + '\n'.join([f"- {r['student_name']} ({r['total_late_days']} أيام)" for r in high[:10]]) if high else 'لا يوجد طلاب عالي الخطورة.')
-        return f"Risk analysis for the last 30 days: High risk {len(high)} students, Medium risk {len(medium)} students.\n" + ('High-risk students:\n' + '\n'.join([f"- {r['student_name']} ({r['total_late_days']} days)" for r in high[:10]]) if high else 'No high-risk students found.')
+            return f"تحليل الخطورة من {from_date} إلى {to_date}: مرتفع {len(high)} طالب، متوسط {len(medium)} طالب.\n" + ('الطلاب عالي الخطورة:\n' + '\n'.join([f"- {r['student_name']} ({r['total_late_days']} أيام)" for r in high[:15]]) if high else 'لا يوجد طلاب عالي الخطورة.')
+        return f"Risk analysis from {from_date} to {to_date}: High risk {len(high)} students, Medium risk {len(medium)} students.\n" + ('High-risk students:\n' + '\n'.join([f"- {r['student_name']} ({r['total_late_days']} days)" for r in high[:15]]) if high else 'No high-risk students found.')
 
-    if any(w in q_low for w in ['summary', 'report', 'ملخص', 'تقرير']):
-        return ai_summary_text(report, default_from, today_iso)
+    if any(w in q_low for w in ['summary', 'report', 'ملخص', 'تقرير', 'overview']):
+        base = ai_summary_text(report, from_date, to_date)
+        if arabic:
+            return (f"ملخص الفترة من {from_date} إلى {to_date}:\n"
+                    f"إجمالي سجلات التأخير: {stats['total_records']}\n"
+                    f"عالي الخطورة: {stats['high_risk']}، متوسط: {stats['medium_risk']}، منخفض: {stats['low_risk']}\n"
+                    f"حسب الصفوف:\n" + '\n'.join([f"- {g['grade_name']}: {g['total_records']} سجل" for g in stats['grades']]))
+        return base + "\nGrade totals:\n" + '\n'.join([f"- {g['grade_name']}: {g['total_records']} records" for g in stats['grades']])
 
-    # Grade questions such as Grade 9 / الصف التاسع.
+    if any(w in q_low for w in ['who recorded', 'recorded by', 'user', 'users', 'من سجل', 'المستخدم', 'اليوزر']):
+        if arabic:
+            return 'سجلات الإدخال حسب المستخدم:\n' + ('\n'.join([f"- {r['recorder_name']}: {r['total_records']} سجل" for r in stats['recorders']]) or 'لا توجد سجلات في الفترة المحددة.')
+        return 'Records by user:\n' + ('\n'.join([f"- {r['recorder_name']}: {r['total_records']} records" for r in stats['recorders']]) or 'No records in the selected period.')
+
     grade_map = {
-        '9': ['grade 9', 'تاسع', 'التاسع', 'صف 9'],
-        '10': ['grade 10', 'عاشر', 'العاشر', 'صف 10'],
+        '9': ['grade 9', 'تاسع', 'التاسع', 'صف 9', 'الصف التاسع'],
+        '10': ['grade 10', 'عاشر', 'العاشر', 'صف 10', 'الصف العاشر'],
         '11': ['grade 11', 'حادي عشر', 'الحادي عشر', 'صف 11'],
         '12': ['grade 12', 'ثاني عشر', 'الثاني عشر', 'صف 12'],
     }
@@ -837,12 +1091,31 @@ def chatbot_answer(question):
             total = sum(r['total_late_days'] for r in grade_rows)
             high = sum(1 for r in grade_rows if r['risk'] == 'High')
             if arabic:
-                return f"ملخص Grade {num} آخر 30 يومًا: مجموع سجلات التأخير {total}، وعدد الطلاب عالي الخطورة {high}."
-            return f"Grade {num} summary for the last 30 days: {total} total late records, {high} high-risk students."
+                return f"ملخص Grade {num} من {from_date} إلى {to_date}: مجموع سجلات التأخير {total}، وعدد الطلاب عالي الخطورة {high}."
+            return f"Grade {num} summary from {from_date} to {to_date}: {total} total late records, {high} high-risk students."
 
     if arabic:
-        return "يمكنك أن تسألني مثل: ما خطورة الطالب Ahmed Al Mansoori؟ من أكثر الطلاب تأخيرًا؟ أعطني ملخص Grade 10؟ من الطلاب عالي الخطورة؟"
-    return "You can ask me: What is Ahmed Al Mansoori's risk? Who is late the most? Give me Grade 10 summary. Who are the high-risk students?"
+        return ("أستطيع الإجابة عن الأسئلة العامة البسيطة وعن بيانات النظام. للحصول على شات بوت يجيب على أي سؤال عام مثل ChatGPT، "
+                "أضف OPENAI_API_KEY في Render Environment. بعد ذلك سأجيب على أي سؤال عام وأحلل بيانات الطلاب بذكاء أعلى.\n\n"
+                "جرّب مثلًا: ما هو اليوم؟ من أكثر الطلاب تأخيرًا؟ من سجل التأخير؟ أعطني تقرير الصف العاشر؟")
+    return ("I can answer simple general questions and system-data questions locally. To make this chatbot answer any general question like ChatGPT, "
+            "add OPENAI_API_KEY in Render Environment. Then it will answer general questions and analyze student data much more intelligently.\n\n"
+            "Try: What day is today? Who is late the most? Who recorded the lateness? Give me Grade 10 report.")
+
+
+def chatbot_answer(question):
+    q = (question or '').strip()
+    if not q:
+        return "Please type a question. / الرجاء كتابة السؤال."
+    from_date, to_date = detect_requested_range(q)
+    try:
+        ai_answer = openai_smart_answer(q, from_date, to_date)
+        if ai_answer:
+            return ai_answer
+    except Exception as exc:
+        fallback = local_smart_answer(q, from_date, to_date)
+        return fallback + f"\n\n[AI API note: {str(exc)[:180]}]"
+    return local_smart_answer(q, from_date, to_date)
 
 
 @app.route('/chatbot', methods=['GET', 'POST'])

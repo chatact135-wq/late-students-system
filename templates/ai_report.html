@@ -3,7 +3,7 @@
 <div class="page-head">
   <div>
     <h1>AI Risk Report</h1>
-    <p class="muted">This AI report analyzes repeated lateness, consecutive late days, and repeated weekday patterns for every student.</p>
+    <p class="muted">This AI report analyzes repeated lateness, consecutive late days, and repeated weekday patterns across weeks for every student.</p>
   </div>
   <a class="button" href="{{ url_for('report', from_date=from_date, to_date=to_date) }}">Open Excel Report</a>
 </div>
@@ -32,9 +32,10 @@
       <th>Student</th>
       <th>Grade</th>
       <th>Section</th>
-      <th>Total Late Days</th>
+      <th>Total Late Days<br><small>Selected Period</small></th>
+      <th>Total Late Days<br><small>Historical</small></th>
       <th>Consecutive Days</th>
-      <th>Repeated Weekday Pattern</th>
+      <th>Repeated Weekday Pattern<br><small>Across Weeks</small></th>
       <th>AI Risk</th>
       <th>AI Reasons</th>
       <th>AI Recommendation</th>
@@ -48,9 +49,14 @@
       <td>{{ r.grade_name }}</td>
       <td>{{ r.section_name }}</td>
       <td>{{ r.total_late_days }}</td>
-      <td>{{ r.max_consecutive }}</td>
+      <td>{{ r.historical_total_late_days }}</td>
+      <td>{{ r.max_consecutive }} <small class="muted">/ historical {{ r.historical_max_consecutive }}</small></td>
       <td>
-        {% if r.repeated_weekdays %}
+        {% if r.historical_repeated_weekdays %}
+          {% for day,details in r.historical_repeated_weekdays.items() %}
+            <div><span class="tag">{{ day }}: {{ details.count }} times</span><br><small class="muted">{{ details.latest_dates|join(", ") }}</small></div>
+          {% endfor %}
+        {% elif r.repeated_weekdays %}
           {% for day,count in r.repeated_weekdays.items() %}<span class="tag">{{ day }}: {{ count }}</span>{% endfor %}
         {% else %}-{% endif %}
       </td>
