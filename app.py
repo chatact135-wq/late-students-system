@@ -17,6 +17,8 @@ import requests
 import re
 import calendar
 
+from roster_seed import OFFICIAL_ROSTER
+
 from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import Workbook
@@ -39,20 +41,34 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
 DEFAULT_ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
-SAMPLE_CLASSES = {
-    "Grade 9": ["9A", "9B", "9C", "9D"],
-    "Grade 10": ["10A", "10B", "10C"],
-    "Grade 11": ["11A", "11B"],
-    "Grade 12": ["12A", "12B"],
+OFFICIAL_GRADE_ORDER = {
+    "Grade 9": 9,
+    "Grade 10": 10,
+    "Grade 11": 11,
+    "Grade 12": 12,
 }
 
-SAMPLE_STUDENTS = {
-    "9A": ["Ahmed Al Mansoori", "Saeed Al Kaabi", "Hamad Al Nuaimi"],
-    "9B": ["Omar Al Shamsi", "Mohammed Al Ali", "Khalifa Al Ameri"],
-    "10A": ["Rashid Al Ketbi", "Sultan Al Darmaki", "Ali Al Hammadi"],
-    "11A": ["Abdullah Al Zaabi", "Majid Al Suwaidi", "Yousef Al Blooshi"],
-    "12A": ["Jassim Al Shamsi", "Hamdan Al Muhairi", "Mubarak Al Neyadi"],
-}
+
+def official_sections_by_grade():
+    sections = {grade: set() for grade in OFFICIAL_GRADE_ORDER}
+    for row in OFFICIAL_ROSTER:
+        grade = row.get("grade_name")
+        section = row.get("section_name")
+        if grade and section:
+            sections.setdefault(grade, set()).add(section)
+    return {grade: sorted(vals, key=section_sort_key) for grade, vals in sections.items()}
+
+
+def section_sort_key(name):
+    """Sort sections like 9 ADV 1, 9 ADV 2, 9 GEN 1, 9 GEN 2."""
+    text = str(name or "")
+    grade_match = re.search(r"(\d+)", text)
+    grade = int(grade_match.group(1)) if grade_match else 999
+    program_order = 1 if "ADV" in text.upper() else 2 if "GEN" in text.upper() else 9
+    nums = re.findall(r"\d+", text)
+    number = int(nums[-1]) if nums else 999
+    return (grade, program_order, number, text)
+
 
 
 class PostgresConnection:
@@ -155,6 +171,7 @@ def init_db():
             FOREIGN KEY(section_id) REFERENCES sections(id) ON DELETE CASCADE
         )
         """)
+        ensure_student_columns(conn)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS late_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,6 +201,100 @@ def init_db():
         conn.commit()
 
 
+
+def table_columns(conn, table_name):
+    """Return column names for SQLite or PostgreSQL."""
+    if USE_POSTGRES:
+        rows = conn.execute("""
+            SELECT column_name AS name
+            FROM information_schema.columns
+            WHERE table_name=?
+        """, (table_name,)).fetchall()
+        return {r["name"] for r in rows}
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {r["name"] for r in rows}
+
+
+def ensure_student_columns(conn):
+    """Add official roster metadata columns to old databases without deleting data."""
+    existing = table_columns(conn, "students")
+    additions = [
+        ("student_number", "TEXT"),
+        ("name_ar", "TEXT"),
+        ("name_en", "TEXT"),
+        ("source_section", "TEXT"),
+        ("source_grade", "TEXT"),
+    ]
+    for col, col_type in additions:
+        if col not in existing:
+            if USE_POSTGRES:
+                conn.execute(f"ALTER TABLE students ADD COLUMN IF NOT EXISTS {col} {col_type}")
+            else:
+                conn.execute(f"ALTER TABLE students ADD COLUMN {col} {col_type}")
+
+
+def upsert_official_student(conn, row, now):
+    """Insert or update one official Excel student into the correct grade and section."""
+    grade = conn.execute("SELECT id FROM grades WHERE name=?", (row["grade_name"],)).fetchone()
+    if not grade:
+        return
+    section = conn.execute(
+        "SELECT id FROM sections WHERE grade_id=? AND name=?",
+        (grade["id"], row["section_name"]),
+    ).fetchone()
+    if not section:
+        return
+    display_name = row.get("name_en") or row.get("name_ar") or row.get("student_number")
+    existing = None
+    if row.get("student_number"):
+        existing = conn.execute(
+            "SELECT id FROM students WHERE student_number=?",
+            (row["student_number"],),
+        ).fetchone()
+    if not existing:
+        existing = conn.execute(
+            "SELECT id FROM students WHERE name=? AND grade_id=? AND section_id=?",
+            (display_name, grade["id"], section["id"]),
+        ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE students
+            SET name=?, student_number=?, name_ar=?, name_en=?, grade_id=?, section_id=?,
+                source_section=?, source_grade=?, active=1
+            WHERE id=?
+            """,
+            (
+                display_name,
+                row.get("student_number"),
+                row.get("name_ar"),
+                row.get("name_en"),
+                grade["id"],
+                section["id"],
+                row.get("source_section"),
+                row.get("source_grade"),
+                existing["id"],
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO students(name, student_number, name_ar, name_en, grade_id, section_id, active, created_at, source_section, source_grade)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            """,
+            (
+                display_name,
+                row.get("student_number"),
+                row.get("name_ar"),
+                row.get("name_en"),
+                grade["id"],
+                section["id"],
+                now,
+                row.get("source_section"),
+                row.get("source_grade"),
+            ),
+        )
+
 def ensure_seed_data(conn):
     now = datetime.now().isoformat(timespec="seconds")
     if not conn.execute("SELECT id FROM users WHERE username=?", (DEFAULT_ADMIN_USERNAME,)).fetchone():
@@ -191,20 +302,23 @@ def ensure_seed_data(conn):
             "INSERT INTO users(username,password_hash,full_name,role,active,created_at) VALUES (?,?,?,?,?,?)",
             (DEFAULT_ADMIN_USERNAME, generate_password_hash(DEFAULT_ADMIN_PASSWORD), "System Admin", "admin", 1, now),
         )
-    for idx, grade_name in enumerate(SAMPLE_CLASSES.keys(), start=9):
-        conn.execute("INSERT OR IGNORE INTO grades(name, sort_order) VALUES (?, ?)", (grade_name, idx))
-    for grade_name, sections in SAMPLE_CLASSES.items():
+
+    # Official grade structure from the uploaded IDH Excel roster.
+    for grade_name, order in OFFICIAL_GRADE_ORDER.items():
+        conn.execute("INSERT OR IGNORE INTO grades(name, sort_order) VALUES (?, ?)", (grade_name, order))
+
+    for grade_name, sections in official_sections_by_grade().items():
         grade = conn.execute("SELECT id FROM grades WHERE name=?", (grade_name,)).fetchone()
+        if not grade:
+            continue
         for sec in sections:
             conn.execute("INSERT OR IGNORE INTO sections(grade_id,name) VALUES (?,?)", (grade["id"], sec))
-    for sec_name, names in SAMPLE_STUDENTS.items():
-        sec = conn.execute("SELECT s.id, s.grade_id FROM sections s WHERE s.name=?", (sec_name,)).fetchone()
-        if sec:
-            for name in names:
-                conn.execute(
-                    "INSERT OR IGNORE INTO students(name,grade_id,section_id,active,created_at) VALUES (?,?,?,?,?)",
-                    (name, sec["grade_id"], sec["id"], 1, now),
-                )
+
+    # Import every student into the exact section from the Excel column, e.g.
+    # 09[Adv-3rdLanguage]/1 -> Grade 9 / 9 ADV 1.
+    for row in OFFICIAL_ROSTER:
+        upsert_official_student(conn, row, now)
+
 
 
 def current_user():
@@ -418,7 +532,11 @@ def add_student():
     section_id = request.form.get("section_id", type=int)
     with get_conn() as conn:
         sec = conn.execute("SELECT grade_id FROM sections WHERE id=?", (section_id,)).fetchone()
-        conn.execute("INSERT OR IGNORE INTO students(name, grade_id, section_id, active, created_at) VALUES (?, ?, ?, 1, ?)", (request.form["name"].strip(), sec["grade_id"], section_id, now))
+        name = request.form["name"].strip()
+        conn.execute("""
+            INSERT OR IGNORE INTO students(name, name_en, grade_id, section_id, active, created_at)
+            VALUES (?, ?, ?, ?, 1, ?)
+        """, (name, name, sec["grade_id"], section_id, now))
         conn.commit()
     return redirect(url_for("admin_home"))
 
@@ -532,7 +650,8 @@ def get_records_range(from_date, to_date, grade_id=None):
         params.append(int(grade_id))
     with get_conn() as conn:
         rows = conn.execute(f"""
-            SELECT r.*, st.name AS student_name, g.id AS grade_id, g.name AS grade_name, sec.name AS section_name,
+            SELECT r.*, st.name AS student_name, st.student_number AS student_number, st.name_ar AS student_name_ar,
+                   st.name_en AS student_name_en, g.id AS grade_id, g.name AS grade_name, sec.name AS section_name,
                    u.full_name AS recorder_name, u.username AS recorder_username
             FROM late_records r
             JOIN students st ON st.id=r.student_id
@@ -621,7 +740,9 @@ def build_excel_workbook_bytes(records, from_date, to_date, grade_id=None):
 
     headers = [
         "No.",
-        "Student Name",
+        "Student No.",
+        "English Name",
+        "Arabic Name",
         "Grade",
         "Section",
         "Late/Absent Day",
@@ -654,14 +775,14 @@ def build_excel_workbook_bytes(records, from_date, to_date, grade_id=None):
         title = f"{grade_name} - Late/Absent Interval Report"
         period = f"Period: {from_date}" if from_date == to_date else f"Period: {from_date} to {to_date}"
 
-        ws.merge_cells("A1:K1")
+        ws.merge_cells("A1:M1")
         ws["A1"] = title
         ws["A1"].font = Font(size=16, bold=True, color=white)
         ws["A1"].fill = PatternFill("solid", fgColor=dark_blue)
         ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
         ws.row_dimensions[1].height = 28
 
-        ws.merge_cells("A2:K2")
+        ws.merge_cells("A2:M2")
         total_records_for_grade = sum(len(v) for v in records_by_grade_date.get(grade_name, {}).values())
         ws["A2"] = f"{period} | Total records in this grade: {total_records_for_grade}"
         ws["A2"].font = Font(size=11, bold=True, color="1F1F1F")
@@ -682,7 +803,7 @@ def build_excel_workbook_bytes(records, from_date, to_date, grade_id=None):
         records_for_grade = records_by_grade_date.get(grade_name, {})
         for day_iso, day_name in each_date_between(from_date, to_date):
             group_row = ws.max_row + 1
-            ws.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=11)
+            ws.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=13)
             group_cell = ws.cell(group_row, 1)
             group_cell.value = f"{day_name} - {day_iso}"
             group_cell.font = Font(bold=True, color=white)
@@ -695,7 +816,9 @@ def build_excel_workbook_bytes(records, from_date, to_date, grade_id=None):
                 for r in day_records:
                     ws.append([
                         counter,
+                        r.get("student_number") or "-",
                         r["student_name"],
+                        r.get("student_name_ar") or "-",
                         r["grade_name"],
                         r["section_name"],
                         r["day_name"],
@@ -707,30 +830,30 @@ def build_excel_workbook_bytes(records, from_date, to_date, grade_id=None):
                         r["created_at"],
                     ])
                     data_row = ws.max_row
-                    total_cell = ws.cell(data_row, 8)
+                    total_cell = ws.cell(data_row, 10)
                     if (r["total_days"] or 0) >= 4:
                         total_cell.fill = PatternFill("solid", fgColor=red)
                     elif (r["total_days"] or 0) >= 1:
                         total_cell.fill = PatternFill("solid", fgColor=yellow)
                     counter += 1
             else:
-                ws.append(["", "No late/absent students recorded", grade_name, "", day_name, day_iso, "", "", "", "", ""])
+                ws.append(["", "", "No late/absent students recorded", "", grade_name, "", day_name, day_iso, "", "", "", "", ""])
                 no_row = ws.max_row
-                for col in range(1, 12):
+                for col in range(1, 14):
                     ws.cell(no_row, col).fill = PatternFill("solid", fgColor=grey)
                 ws.cell(no_row, 2).font = Font(italic=True, color="666666")
 
         # Formatting and print readiness
         thin = Side(style="thin", color=border_color)
-        for row in ws.iter_rows(min_row=4, max_row=ws.max_row, min_col=1, max_col=11):
+        for row in ws.iter_rows(min_row=4, max_row=ws.max_row, min_col=1, max_col=13):
             for cell in row:
                 cell.border = Border(top=thin, bottom=thin, left=thin, right=thin)
                 cell.alignment = Alignment(vertical="center", wrap_text=True)
 
-        widths = [7, 30, 13, 12, 18, 14, 13, 17, 24, 16, 22]
+        widths = [7, 15, 30, 28, 13, 14, 18, 14, 13, 17, 24, 16, 22]
         for i, width in enumerate(widths, start=1):
             ws.column_dimensions[get_column_letter(i)].width = width
-        ws.auto_filter.ref = f"A4:K{ws.max_row}"
+        ws.auto_filter.ref = f"A4:M{ws.max_row}"
         ws.page_setup.orientation = "landscape"
         ws.page_setup.fitToWidth = 1
         ws.page_setup.fitToHeight = 0
