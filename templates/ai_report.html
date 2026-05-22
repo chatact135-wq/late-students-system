@@ -1,0 +1,64 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>AI Risk Report</h1>
+    <p class="muted">This AI report analyzes repeated lateness, consecutive late days, and repeated weekday patterns for every student.</p>
+  </div>
+  <a class="button" href="{{ url_for('report', from_date=from_date, to_date=to_date) }}">Open Excel Report</a>
+</div>
+
+<form class="filters" method="get">
+  <label>From Date<input type="date" name="from_date" value="{{ from_date }}"></label>
+  <label>To Date<input type="date" name="to_date" value="{{ to_date }}"></label>
+  <button class="button" type="submit">Generate AI Report</button>
+</form>
+
+<div class="card ai-summary">
+  <h2>AI Executive Summary</h2>
+  <p>{{ summary }}</p>
+</div>
+
+<div class="risk-cards">
+  <div class="risk-card high">High Risk<br><strong>{{ report|selectattr('risk','equalto','High')|list|length }}</strong></div>
+  <div class="risk-card medium">Medium Risk<br><strong>{{ report|selectattr('risk','equalto','Medium')|list|length }}</strong></div>
+  <div class="risk-card low">Low Risk<br><strong>{{ report|selectattr('risk','equalto','Low')|list|length }}</strong></div>
+</div>
+
+<table class="table">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Student</th>
+      <th>Grade</th>
+      <th>Section</th>
+      <th>Total Late Days</th>
+      <th>Consecutive Days</th>
+      <th>Repeated Weekday Pattern</th>
+      <th>AI Risk</th>
+      <th>AI Reasons</th>
+      <th>AI Recommendation</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in report %}
+    <tr class="risk-row {{ r.risk|lower }}">
+      <td>{{ loop.index }}</td>
+      <td>{{ r.student_name }}</td>
+      <td>{{ r.grade_name }}</td>
+      <td>{{ r.section_name }}</td>
+      <td>{{ r.total_late_days }}</td>
+      <td>{{ r.max_consecutive }}</td>
+      <td>
+        {% if r.repeated_weekdays %}
+          {% for day,count in r.repeated_weekdays.items() %}<span class="tag">{{ day }}: {{ count }}</span>{% endfor %}
+        {% else %}-{% endif %}
+      </td>
+      <td><strong>{{ r.risk }}</strong> ({{ r.score }}/100)</td>
+      <td>{% for reason in r.reasons %}<div>• {{ reason }}</div>{% endfor %}</td>
+      <td>{{ r.recommendation }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

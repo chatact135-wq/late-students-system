@@ -13,6 +13,8 @@
     <div class="navlinks">
       <a href="{{ url_for('dashboard') }}">Register Late</a>
       <a href="{{ url_for('report') }}">Daily Report</a>
+      <a href="{{ url_for('ai_report') }}">AI Report</a>
+      <a href="{{ url_for('chatbot') }}">AI Chatbot</a>
       {% if me.role == 'admin' %}<a href="{{ url_for('admin_home') }}">Admin Panel</a>{% endif %}
       <span class="userpill">{{ me.full_name }} · {{ me.role }}</span>
       <a class="logout" href="{{ url_for('logout') }}">Logout</a>

@@ -611,6 +611,251 @@ def build_excel_response(records, from_date, to_date):
     )
 
 
+
+# =========================
+# AI ANALYTICS + CHATBOT
+# =========================
+
+def grade_number_from_name(name):
+    digits = ''.join(ch for ch in str(name or '') if ch.isdigit())
+    return int(digits) if digits else 999
+
+
+def get_ai_risk_report(from_date, to_date):
+    """Rule-based AI engine for lateness risk.
+    It detects: high total lateness, consecutive days, and repeated weekday patterns.
+    No paid AI API is required, so it works on Render immediately.
+    """
+    with get_conn() as conn:
+        students = conn.execute("""
+            SELECT st.id, st.name AS student_name, g.name AS grade_name, sec.name AS section_name
+            FROM students st
+            JOIN grades g ON g.id=st.grade_id
+            JOIN sections sec ON sec.id=st.section_id
+            WHERE st.active=1
+            ORDER BY g.sort_order, sec.name, st.name
+        """).fetchall()
+        rows = conn.execute("""
+            SELECT r.student_id, r.late_date, r.late_time, u.full_name AS recorder_name, u.username AS recorder_username
+            FROM late_records r
+            LEFT JOIN users u ON u.id=r.recorded_by
+            WHERE r.late_date BETWEEN ? AND ?
+            ORDER BY r.student_id, r.late_date
+        """, (from_date, to_date)).fetchall()
+
+    by_student = {}
+    for r in rows:
+        by_student.setdefault(r['student_id'], []).append(dict(r))
+
+    report = []
+    for st in students:
+        records = by_student.get(st['id'], [])
+        dates = sorted({r['late_date'] for r in records})
+        total = len(dates)
+        weekday_counts = {}
+        for d in dates:
+            day_name = datetime.strptime(d, "%Y-%m-%d").strftime("%A")
+            weekday_counts[day_name] = weekday_counts.get(day_name, 0) + 1
+        repeated_weekdays = {k: v for k, v in weekday_counts.items() if v >= 2}
+
+        max_consecutive = 0
+        current = 0
+        previous_day = None
+        for d in dates:
+            current_day = datetime.strptime(d, "%Y-%m-%d").date()
+            if previous_day and (current_day - previous_day).days == 1:
+                current += 1
+            else:
+                current = 1
+            max_consecutive = max(max_consecutive, current)
+            previous_day = current_day
+
+        reasons = []
+        score = 0
+        if total > 5:
+            score += 45
+            reasons.append(f"More than 5 late records in the selected period ({total}).")
+        elif total >= 3:
+            score += 25
+            reasons.append(f"Repeated lateness: {total} records in the selected period.")
+        elif total >= 1:
+            score += 10
+            reasons.append(f"Recorded late {total} time(s) in the selected period.")
+
+        if max_consecutive >= 2:
+            score += 30
+            reasons.append(f"Consecutive lateness detected for {max_consecutive} day(s).")
+
+        if repeated_weekdays:
+            score += 25
+            repeated_text = ', '.join([f"{day} ({count} times)" for day, count in repeated_weekdays.items()])
+            reasons.append(f"Repeated weekday pattern: {repeated_text}.")
+
+        if total == 0:
+            risk = "Low"
+            recommendation = "No action required. Continue normal monitoring."
+            reasons.append("No lateness recorded in this period.")
+        elif score >= 70:
+            risk = "High"
+            recommendation = "Immediate follow-up is recommended. Review morning arrival pattern and assign targeted monitoring."
+        elif score >= 35:
+            risk = "Medium"
+            recommendation = "Monitor closely for the next week and remind the student about punctual arrival."
+        else:
+            risk = "Low"
+            recommendation = "Keep monitoring. No urgent intervention is required now."
+
+        report.append({
+            "student_id": st['id'],
+            "student_name": st['student_name'],
+            "grade_name": st['grade_name'],
+            "section_name": st['section_name'],
+            "total_late_days": total,
+            "max_consecutive": max_consecutive,
+            "repeated_weekdays": repeated_weekdays,
+            "risk": risk,
+            "score": min(score, 100),
+            "reasons": reasons,
+            "recommendation": recommendation,
+            "records": records,
+        })
+    risk_order = {"High": 0, "Medium": 1, "Low": 2}
+    report.sort(key=lambda x: (risk_order.get(x['risk'], 3), -x['total_late_days'], x['grade_name'], x['section_name'], x['student_name']))
+    return report
+
+
+def ai_summary_text(report, from_date, to_date):
+    total_students = len(report)
+    high = sum(1 for r in report if r['risk'] == 'High')
+    medium = sum(1 for r in report if r['risk'] == 'Medium')
+    low = sum(1 for r in report if r['risk'] == 'Low')
+    total_records = sum(r['total_late_days'] for r in report)
+    top = [r for r in report if r['total_late_days'] > 0][:5]
+    lines = [
+        f"AI Summary for {from_date} to {to_date}",
+        f"Total students analyzed: {total_students}.",
+        f"Total late records: {total_records}.",
+        f"Risk distribution: High {high}, Medium {medium}, Low {low}.",
+    ]
+    if top:
+        lines.append("Top students needing follow-up: " + "; ".join([f"{r['student_name']} ({r['risk']}, {r['total_late_days']} days)" for r in top]) + ".")
+    else:
+        lines.append("No late records found in this period.")
+    return " ".join(lines)
+
+
+@app.route('/ai-report')
+@login_required
+def ai_report():
+    today_iso = date.today().isoformat()
+    from_date = parse_date_or_today(request.args.get('from_date') or today_iso)
+    to_date = parse_date_or_today(request.args.get('to_date') or from_date)
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+    report = get_ai_risk_report(from_date, to_date)
+    summary = ai_summary_text(report, from_date, to_date)
+    return render_template('ai_report.html', report=report, summary=summary, from_date=from_date, to_date=to_date, today=today_iso)
+
+
+def is_arabic(text):
+    return any('\u0600' <= ch <= '\u06FF' for ch in text or '')
+
+
+def chatbot_answer(question):
+    q = (question or '').strip()
+    q_low = q.lower()
+    arabic = is_arabic(q)
+    today_iso = date.today().isoformat()
+    default_from = (date.today() - timedelta(days=30)).isoformat()
+    report = get_ai_risk_report(default_from, today_iso)
+
+    # Find a student name mentioned in the question.
+    mentioned = None
+    for r in report:
+        if r['student_name'].lower() in q_low:
+            mentioned = r
+            break
+        parts = [p.lower() for p in r['student_name'].split() if len(p) > 2]
+        if parts and any(p in q_low for p in parts):
+            mentioned = r
+            break
+
+    def en_student(r):
+        weekdays = ', '.join([f"{d} ({c})" for d, c in r['repeated_weekdays'].items()]) or 'No repeated weekday pattern'
+        reasons = ' '.join(r['reasons'])
+        return (f"{r['student_name']} - {r['grade_name']} {r['section_name']}\n"
+                f"Risk Level: {r['risk']} ({r['score']}/100)\n"
+                f"Total Late Days in last 30 days: {r['total_late_days']}\n"
+                f"Max Consecutive Late Days: {r['max_consecutive']}\n"
+                f"Repeated Weekdays: {weekdays}\n"
+                f"AI Reasons: {reasons}\n"
+                f"Recommendation: {r['recommendation']}")
+
+    def ar_student(r):
+        risk_ar = {'High': 'مرتفع', 'Medium': 'متوسط', 'Low': 'منخفض'}.get(r['risk'], r['risk'])
+        weekdays = '، '.join([f"{d} ({c})" for d, c in r['repeated_weekdays'].items()]) or 'لا يوجد نمط يوم متكرر'
+        reasons = ' '.join(r['reasons'])
+        return (f"الطالب: {r['student_name']} - {r['grade_name']} {r['section_name']}\n"
+                f"مستوى الخطورة: {risk_ar} ({r['score']}/100)\n"
+                f"مجموع أيام التأخير آخر 30 يومًا: {r['total_late_days']}\n"
+                f"أعلى تأخير متتالي: {r['max_consecutive']} يوم\n"
+                f"الأيام المتكررة: {weekdays}\n"
+                f"أسباب التحليل: {reasons}\n"
+                f"التوصية: {r['recommendation']}")
+
+    if mentioned:
+        return ar_student(mentioned) if arabic else en_student(mentioned)
+
+    if any(w in q_low for w in ['highest', 'most', 'top', 'أكثر', 'اعلى', 'أعلى']):
+        top = [r for r in report if r['total_late_days'] > 0][:5]
+        if not top:
+            return 'لا توجد سجلات تأخير خلال آخر 30 يومًا.' if arabic else 'No late records were found in the last 30 days.'
+        if arabic:
+            return 'أكثر الطلاب تأخيرًا آخر 30 يومًا:\n' + '\n'.join([f"- {r['student_name']} | {r['grade_name']} {r['section_name']} | {r['total_late_days']} أيام | خطورة {r['risk']}" for r in top])
+        return 'Top late students in the last 30 days:\n' + '\n'.join([f"- {r['student_name']} | {r['grade_name']} {r['section_name']} | {r['total_late_days']} days | {r['risk']} risk" for r in top])
+
+    if any(w in q_low for w in ['risk', 'danger', 'خطورة', 'ريسك', 'خطر']):
+        high = [r for r in report if r['risk'] == 'High']
+        medium = [r for r in report if r['risk'] == 'Medium']
+        if arabic:
+            return f"تحليل الخطورة آخر 30 يومًا: مرتفع {len(high)} طالب، متوسط {len(medium)} طالب.\n" + ('الطلاب عالي الخطورة:\n' + '\n'.join([f"- {r['student_name']} ({r['total_late_days']} أيام)" for r in high[:10]]) if high else 'لا يوجد طلاب عالي الخطورة.')
+        return f"Risk analysis for the last 30 days: High risk {len(high)} students, Medium risk {len(medium)} students.\n" + ('High-risk students:\n' + '\n'.join([f"- {r['student_name']} ({r['total_late_days']} days)" for r in high[:10]]) if high else 'No high-risk students found.')
+
+    if any(w in q_low for w in ['summary', 'report', 'ملخص', 'تقرير']):
+        return ai_summary_text(report, default_from, today_iso)
+
+    # Grade questions such as Grade 9 / الصف التاسع.
+    grade_map = {
+        '9': ['grade 9', 'تاسع', 'التاسع', 'صف 9'],
+        '10': ['grade 10', 'عاشر', 'العاشر', 'صف 10'],
+        '11': ['grade 11', 'حادي عشر', 'الحادي عشر', 'صف 11'],
+        '12': ['grade 12', 'ثاني عشر', 'الثاني عشر', 'صف 12'],
+    }
+    for num, keys in grade_map.items():
+        if any(k in q_low for k in keys):
+            grade_rows = [r for r in report if str(grade_number_from_name(r['grade_name'])) == num]
+            total = sum(r['total_late_days'] for r in grade_rows)
+            high = sum(1 for r in grade_rows if r['risk'] == 'High')
+            if arabic:
+                return f"ملخص Grade {num} آخر 30 يومًا: مجموع سجلات التأخير {total}، وعدد الطلاب عالي الخطورة {high}."
+            return f"Grade {num} summary for the last 30 days: {total} total late records, {high} high-risk students."
+
+    if arabic:
+        return "يمكنك أن تسألني مثل: ما خطورة الطالب Ahmed Al Mansoori؟ من أكثر الطلاب تأخيرًا؟ أعطني ملخص Grade 10؟ من الطلاب عالي الخطورة؟"
+    return "You can ask me: What is Ahmed Al Mansoori's risk? Who is late the most? Give me Grade 10 summary. Who are the high-risk students?"
+
+
+@app.route('/chatbot', methods=['GET', 'POST'])
+@login_required
+def chatbot():
+    answer = None
+    question = ''
+    if request.method == 'POST':
+        question = request.form.get('question', '')
+        answer = chatbot_answer(question)
+    return render_template('chatbot.html', question=question, answer=answer)
+
+
 def build_email_body(day_text):
     records = get_daily_records(day_text)
     if not records:

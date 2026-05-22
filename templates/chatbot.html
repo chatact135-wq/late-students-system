@@ -1,0 +1,36 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>AI Chatbot</h1>
+    <p class="muted">Ask in Arabic or English about students, grades, repeated lateness, risk level, and summaries. The chatbot reads from the system database.</p>
+  </div>
+</div>
+
+<div class="card chatbot-card">
+  <form method="post" class="chat-form">
+    <label>Ask the AI Assistant / اسأل المساعد الذكي</label>
+    <textarea name="question" rows="4" placeholder="Example: Who is late the most? / من أكثر الطلاب تأخيرًا؟">{{ question }}</textarea>
+    <button class="button" type="submit">Ask AI</button>
+  </form>
+
+  {% if answer %}
+  <div class="chat-answer">
+    <h2>AI Answer</h2>
+    <pre>{{ answer }}</pre>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card examples">
+  <h2>Example Questions</h2>
+  <div class="example-grid">
+    <span>Who is late the most?</span>
+    <span>Give me Grade 10 summary.</span>
+    <span>Who are the high-risk students?</span>
+    <span>ما خطورة الطالب Ahmed Al Mansoori؟</span>
+    <span>من أكثر الطلاب تأخيرًا؟</span>
+    <span>أعطني ملخص الصف العاشر.</span>
+  </div>
+</div>
+{% endblock %}
