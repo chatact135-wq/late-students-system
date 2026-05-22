@@ -45,3 +45,27 @@ Environment Variables for email:
 - Red warning: 4+ consecutive late days
 - Daily report page
 - Excel export with student, class, section, late time, consecutive days, and recorded-by user
+
+## Latest Update: Calendar Back Entry + Date Range Excel
+
+This version supports:
+
+1. Selecting any previous date from the dashboard calendar.
+2. Marking a student late for that selected old date.
+3. Returning to today's date and seeing the student's total late days across all saved dates.
+4. Yellow status for 1-3 total late days.
+5. Red status for 4+ total late days.
+6. Excel export for one selected day.
+7. Excel export for a custom date range from the Report page.
+8. Excel includes all grades/sections, student name, late date, late time, total late days, recorded by, and entry timestamp.
+
+Dashboard date behavior:
+- The date picker controls which day you are editing.
+- If you choose 2026-05-10 and click Late, the record is saved for 2026-05-10, not today's date.
+- The time column stores the real time the user entered the record.
+
+Report behavior:
+- Open Report.
+- Choose From Date and To Date.
+- Click Show Report.
+- Click Export Excel.

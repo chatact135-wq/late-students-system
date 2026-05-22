@@ -186,7 +186,7 @@ def logout():
 def dashboard():
     selected_grade = request.args.get("grade_id", type=int)
     selected_section = request.args.get("section_id", type=int)
-    today_text = request.args.get("date") or date.today().isoformat()
+    today_text = parse_date_or_today(request.args.get("date"))
     with get_conn() as conn:
         grades = conn.execute("SELECT * FROM grades ORDER BY sort_order, name").fetchall()
         if not selected_grade and grades:
@@ -221,12 +221,35 @@ def consecutive_late_days(student_id, end_day):
     return count
 
 
+def parse_date_or_today(value):
+    """Safely read yyyy-mm-dd from forms/query strings."""
+    try:
+        return datetime.strptime(value or "", "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return date.today().isoformat()
+
+
+def total_late_days(student_id, end_day=None):
+    """Total unique late days for a student up to the selected date.
+    This is used for color status and the total shown on today's dashboard.
+    """
+    with get_conn() as conn:
+        if end_day:
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT late_date) AS c FROM late_records WHERE student_id=? AND late_date<=?",
+                (student_id, end_day),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT late_date) AS c FROM late_records WHERE student_id=?",
+                (student_id,),
+            ).fetchone()
+    return row["c"] or 0
+
+
 def warning_streak(student_id, today_text):
-    count_today = consecutive_late_days(student_id, today_text)
-    if count_today:
-        return count_today
-    yesterday = (datetime.fromisoformat(today_text).date() - timedelta(days=1)).isoformat()
-    return consecutive_late_days(student_id, yesterday)
+    # Backward-compatible name: now returns TOTAL late days up to selected date, not only consecutive days.
+    return total_late_days(student_id, today_text)
 
 
 def status_color(count):
@@ -240,29 +263,34 @@ def status_color(count):
 @app.post("/mark_late/<int:student_id>")
 @login_required
 def mark_late(student_id):
+    selected_date = parse_date_or_today(request.form.get("date"))
+    selected_grade = request.form.get("grade_id", type=int)
+    selected_section = request.form.get("section_id", type=int)
     now = datetime.now()
-    today_text = now.date().isoformat()
     with get_conn() as conn:
         s = conn.execute("SELECT grade_id, section_id FROM students WHERE id=?", (student_id,)).fetchone()
+        # The late_date can be a previous calendar date, while late_time records the real entry time.
         conn.execute("""
             INSERT OR REPLACE INTO late_records(student_id, late_date, late_time, recorded_by, created_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (student_id, today_text, now.strftime("%H:%M:%S"), session["user_id"], now.isoformat(timespec="seconds")))
+        """, (student_id, selected_date, now.strftime("%H:%M:%S"), session["user_id"], now.isoformat(timespec="seconds")))
         conn.commit()
-    flash("Late record saved.", "success")
-    return redirect(url_for("dashboard", grade_id=s["grade_id"], section_id=s["section_id"]))
+    flash(f"Late record saved for {selected_date}.", "success")
+    return redirect(url_for("dashboard", grade_id=selected_grade or s["grade_id"], section_id=selected_section or s["section_id"], date=selected_date))
 
 
 @app.post("/unmark_late/<int:student_id>")
 @login_required
 def unmark_late(student_id):
-    today_text = date.today().isoformat()
+    selected_date = parse_date_or_today(request.form.get("date"))
+    selected_grade = request.form.get("grade_id", type=int)
+    selected_section = request.form.get("section_id", type=int)
     with get_conn() as conn:
         s = conn.execute("SELECT grade_id, section_id FROM students WHERE id=?", (student_id,)).fetchone()
-        conn.execute("DELETE FROM late_records WHERE student_id=? AND late_date=?", (student_id, today_text))
+        conn.execute("DELETE FROM late_records WHERE student_id=? AND late_date=?", (student_id, selected_date))
         conn.commit()
-    flash("Late record removed for today.", "success")
-    return redirect(url_for("dashboard", grade_id=s["grade_id"], section_id=s["section_id"]))
+    flash(f"Late record removed for {selected_date}.", "success")
+    return redirect(url_for("dashboard", grade_id=selected_grade or s["grade_id"], section_id=selected_section or s["section_id"], date=selected_date))
 
 
 @app.route("/admin")
@@ -353,12 +381,16 @@ def toggle_user(user_id):
 @app.route("/report")
 @login_required
 def report():
-    day_text = request.args.get("date") or date.today().isoformat()
-    records = get_daily_records(day_text)
-    return render_template("report.html", records=records, today=day_text)
+    today_iso = date.today().isoformat()
+    from_date = parse_date_or_today(request.args.get("from_date") or request.args.get("date") or today_iso)
+    to_date = parse_date_or_today(request.args.get("to_date") or from_date)
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+    records = get_records_range(from_date, to_date)
+    return render_template("report.html", records=records, from_date=from_date, to_date=to_date, today=today_iso)
 
 
-def get_daily_records(day_text):
+def get_records_range(from_date, to_date):
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT r.*, st.name AS student_name, g.name AS grade_name, sec.name AS section_name,
@@ -368,25 +400,45 @@ def get_daily_records(day_text):
             JOIN grades g ON g.id=st.grade_id
             JOIN sections sec ON sec.id=st.section_id
             LEFT JOIN users u ON u.id=r.recorded_by
-            WHERE r.late_date=?
-            ORDER BY g.sort_order, sec.name, r.late_time
-        """, (day_text,)).fetchall()
-    return [{**dict(r), "streak": consecutive_late_days(r["student_id"], day_text)} for r in rows]
+            WHERE r.late_date BETWEEN ? AND ?
+            ORDER BY r.late_date, g.sort_order, sec.name, st.name, r.late_time
+        """, (from_date, to_date)).fetchall()
+    return [{**dict(r), "total_days": total_late_days(r["student_id"], to_date)} for r in rows]
+
+
+def get_daily_records(day_text):
+    return get_records_range(day_text, day_text)
+
+
+@app.route("/export/late_report.xlsx")
+@login_required
+def export_late_report_excel():
+    today_iso = date.today().isoformat()
+    from_date = parse_date_or_today(request.args.get("from_date") or request.args.get("date") or today_iso)
+    to_date = parse_date_or_today(request.args.get("to_date") or from_date)
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+    records = get_records_range(from_date, to_date)
+    return build_excel_response(records, from_date, to_date)
 
 
 @app.route("/export/daily.xlsx")
 @login_required
 def export_daily_excel():
-    day_text = request.args.get("date") or date.today().isoformat()
-    records = get_daily_records(day_text)
+    # Kept for old buttons/links; now supports date or from_date/to_date.
+    return export_late_report_excel()
+
+
+def build_excel_response(records, from_date, to_date):
     wb = Workbook()
     ws = wb.active
     ws.title = "Late Students"
-    ws.merge_cells("A1:H1")
-    ws["A1"] = f"Daily Late Arrival Report - {day_text}"
+    ws.merge_cells("A1:I1")
+    title = f"Late Arrival Report - {from_date}" if from_date == to_date else f"Late Arrival Report - {from_date} to {to_date}"
+    ws["A1"] = title
     ws["A1"].font = Font(size=16, bold=True)
     ws["A1"].alignment = Alignment(horizontal="center")
-    headers = ["No.", "Student Name", "Grade", "Section", "Late Date", "Late Time", "Consecutive Days", "Recorded By"]
+    headers = ["No.", "Student Name", "Grade", "Section", "Late Date", "Late Time", "Total Late Days", "Recorded By", "Entry Created At"]
     ws.append([])
     ws.append(headers)
     for cell in ws[3]:
@@ -394,28 +446,32 @@ def export_daily_excel():
         cell.fill = PatternFill("solid", fgColor="1F4E78")
         cell.alignment = Alignment(horizontal="center")
     for i, r in enumerate(records, start=1):
-        ws.append([i, r["student_name"], r["grade_name"], r["section_name"], r["late_date"], r["late_time"], r["streak"], f"{r['recorder_name'] or 'Unknown'} ({r['recorder_username'] or '-'})"])
+        ws.append([
+            i, r["student_name"], r["grade_name"], r["section_name"], r["late_date"], r["late_time"],
+            r["total_days"], f"{r['recorder_name'] or 'Unknown'} ({r['recorder_username'] or '-'})", r["created_at"]
+        ])
     thin = Side(style="thin", color="B7B7B7")
-    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, min_col=1, max_col=8):
+    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, min_col=1, max_col=9):
         for cell in row:
             cell.border = Border(top=thin, bottom=thin, left=thin, right=thin)
             cell.alignment = Alignment(vertical="center")
-    widths = [8, 28, 14, 12, 14, 14, 20, 30]
+    widths = [8, 28, 14, 12, 14, 14, 18, 30, 22]
     for i, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
-    return send_file(bio, as_attachment=True, download_name=f"late_students_{day_text}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    suffix = from_date if from_date == to_date else f"{from_date}_to_{to_date}"
+    return send_file(bio, as_attachment=True, download_name=f"late_students_{suffix}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 def build_email_body(day_text):
     records = get_daily_records(day_text)
     if not records:
         return f"Daily Late Arrival Report - {day_text}\n\nNo late students recorded today."
-    lines = [f"Daily Late Arrival Report - {day_text}", "", "Student | Grade | Section | Time | Streak | Recorded By", "-"*90]
+    lines = [f"Daily Late Arrival Report - {day_text}", "", "Student | Grade | Section | Date | Time | Total Days | Recorded By", "-"*90]
     for r in records:
-        lines.append(f"{r['student_name']} | {r['grade_name']} | {r['section_name']} | {r['late_time']} | {r['streak']} | {r['recorder_name'] or 'Unknown'}")
+        lines.append(f"{r['student_name']} | {r['grade_name']} | {r['section_name']} | {r['late_date']} | {r['late_time']} | {r['total_days']} | {r['recorder_name'] or 'Unknown'}")
     return "\n".join(lines)
 
 
