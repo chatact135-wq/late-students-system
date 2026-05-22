@@ -5,6 +5,8 @@ from functools import wraps
 from io import BytesIO
 from email.message import EmailMessage
 import smtplib
+import base64
+import requests
 import re
 import calendar
 
@@ -1247,16 +1249,109 @@ def build_email_body(day_text, grade_name=None):
     lines.append("\nAttached: official Excel report for printing/submission.")
     return "\n".join(lines)
 
-def send_email_with_attachment(to_email, subject, body, attachment_bytes, filename):
-    """Send email safely without crashing the web page.
+def _attachment_b64(attachment_bytes):
+    """Return base64 string for API email attachments."""
+    raw = attachment_bytes.getvalue() if hasattr(attachment_bytes, "getvalue") else attachment_bytes
+    return base64.b64encode(raw).decode("utf-8")
 
-    Supports Gmail/Office365 STARTTLS on port 587 and SSL on port 465.
-    A short timeout prevents Render/Gunicorn from killing the worker if SMTP
-    connection is blocked or slow.
+
+def get_email_provider():
+    """Choose the safest email provider for Render.
+
+    Preferred providers:
+      EMAIL_PROVIDER=resend   + RESEND_API_KEY
+      EMAIL_PROVIDER=sendgrid + SENDGRID_API_KEY
+
+    SMTP remains as a fallback only, because some Render networks cannot reach
+    smtp.gmail.com ports 465/587.
     """
+    provider = (os.environ.get("EMAIL_PROVIDER") or "").strip().lower()
+    if provider:
+        return provider
+    if os.environ.get("RESEND_API_KEY"):
+        return "resend"
+    if os.environ.get("SENDGRID_API_KEY"):
+        return "sendgrid"
+    return "smtp"
+
+
+def send_email_resend(to_email, subject, body, attachment_bytes, filename):
+    api_key = os.environ.get("RESEND_API_KEY")
+    sender = os.environ.get("EMAIL_FROM") or os.environ.get("SMTP_FROM") or os.environ.get("RESEND_FROM")
+    if not api_key or not sender:
+        return False, "Resend settings are missing. Add RESEND_API_KEY and EMAIL_FROM in Render Environment."
+
+    payload = {
+        "from": sender,
+        "to": [to_email],
+        "subject": subject,
+        "text": body,
+        "attachments": [
+            {
+                "filename": filename,
+                "content": _attachment_b64(attachment_bytes),
+            }
+        ],
+    }
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=25,
+        )
+        if 200 <= response.status_code < 300:
+            return True, "Email sent successfully using Resend API."
+        return False, f"Resend API error {response.status_code}: {response.text[:300]}"
+    except requests.RequestException as exc:
+        return False, f"Resend connection failed: {str(exc)[:220]}"
+
+
+def send_email_sendgrid(to_email, subject, body, attachment_bytes, filename):
+    api_key = os.environ.get("SENDGRID_API_KEY")
+    sender = os.environ.get("EMAIL_FROM") or os.environ.get("SMTP_FROM") or os.environ.get("SENDGRID_FROM")
+    if not api_key or not sender:
+        return False, "SendGrid settings are missing. Add SENDGRID_API_KEY and EMAIL_FROM in Render Environment."
+
+    payload = {
+        "personalizations": [{"to": [{"email": to_email}]}],
+        "from": {"email": sender},
+        "subject": subject,
+        "content": [{"type": "text/plain", "value": body}],
+        "attachments": [
+            {
+                "content": _attachment_b64(attachment_bytes),
+                "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "filename": filename,
+                "disposition": "attachment",
+            }
+        ],
+    }
+    try:
+        response = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=25,
+        )
+        if 200 <= response.status_code < 300:
+            return True, "Email sent successfully using SendGrid API."
+        return False, f"SendGrid API error {response.status_code}: {response.text[:300]}"
+    except requests.RequestException as exc:
+        return False, f"SendGrid connection failed: {str(exc)[:220]}"
+
+
+def send_email_smtp(to_email, subject, body, attachment_bytes, filename):
+    """Fallback SMTP sender. API providers are recommended on Render."""
     smtp_host, smtp_port, smtp_user, smtp_password, sender = get_smtp_settings()
     if not smtp_user or not smtp_password or not sender:
-        return False, "SMTP settings are missing. Add SMTP_USER, SMTP_PASSWORD, SMTP_HOST, SMTP_PORT and SMTP_FROM in Render Environment."
+        return False, "SMTP settings are missing. Add SMTP_USER, SMTP_PASSWORD, SMTP_HOST, SMTP_PORT and SMTP_FROM in Render Environment, or use RESEND_API_KEY / SENDGRID_API_KEY."
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -1282,13 +1377,25 @@ def send_email_with_attachment(to_email, subject, body, attachment_bytes, filena
                 server.ehlo()
                 server.login(smtp_user, smtp_password)
                 server.send_message(msg)
-        return True, "Email sent successfully."
+        return True, "Email sent successfully using SMTP."
     except smtplib.SMTPAuthenticationError:
         return False, "SMTP authentication failed. Check SMTP_USER and Gmail App Password. Do not use your normal Gmail password."
     except (TimeoutError, OSError) as exc:
-        return False, f"SMTP connection failed or timed out. Try SMTP_PORT=465 with Gmail, or check that Render can reach {smtp_host}. Details: {str(exc)[:160]}"
+        return False, f"SMTP connection failed or timed out. Render may block SMTP. Use Resend or SendGrid API. Details: {str(exc)[:160]}"
     except Exception as exc:
-        return False, f"Email sending failed: {type(exc).__name__}: {str(exc)[:180]}"
+        return False, f"SMTP email sending failed: {type(exc).__name__}: {str(exc)[:180]}"
+
+
+def send_email_with_attachment(to_email, subject, body, attachment_bytes, filename):
+    """Send Excel report using an Email API first, SMTP only as fallback."""
+    provider = get_email_provider()
+    if provider == "resend":
+        return send_email_resend(to_email, subject, body, attachment_bytes, filename)
+    if provider == "sendgrid":
+        return send_email_sendgrid(to_email, subject, body, attachment_bytes, filename)
+    if provider == "smtp":
+        return send_email_smtp(to_email, subject, body, attachment_bytes, filename)
+    return False, "Invalid EMAIL_PROVIDER. Use resend, sendgrid, or smtp."
 
 
 def send_grade_email(grade_id, recipient_id, day_text=None):
