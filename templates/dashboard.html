@@ -5,7 +5,15 @@
     <h1>Late Arrival Registration</h1>
     <p class="muted">Choose any calendar date, then click ✓ beside the student. Today's page shows the total late days saved from all previous selected dates.</p>
   </div>
-  <a class="button" href="{{ url_for('export_late_report_excel', from_date=today, to_date=today) }}">Download Selected Day Excel</a>
+</div>
+<div class="export-card">
+  <h2>Download Excel by Interval</h2>
+  <p class="muted">Choose Start Date and End Date. The Excel file will include every late/absent record between these two dates, grouped by day.</p>
+  <form class="filters" method="get" action="{{ url_for('export_late_report_excel') }}">
+    <label>Start Date<input type="date" name="from_date" value="{{ today }}" required></label>
+    <label>End Date<input type="date" name="to_date" value="{{ today }}" required></label>
+    <button class="button" type="submit">Download Interval Excel</button>
+  </form>
 </div>
 <form class="filters" method="get">
   <label>Grade

@@ -69,3 +69,8 @@ Report behavior:
 - Choose From Date and To Date.
 - Click Show Report.
 - Click Export Excel.
+
+## Latest Update
+- The dashboard Excel download now uses two calendar fields: Start Date and End Date.
+- The exported Excel file includes all late/absent records in the selected interval.
+- The Excel file groups entries by each recorded day and includes the day name, date, time, student, grade, section, total late days, and recorded-by user.

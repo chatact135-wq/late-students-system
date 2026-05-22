@@ -403,7 +403,13 @@ def get_records_range(from_date, to_date):
             WHERE r.late_date BETWEEN ? AND ?
             ORDER BY r.late_date, g.sort_order, sec.name, st.name, r.late_time
         """, (from_date, to_date)).fetchall()
-    return [{**dict(r), "total_days": total_late_days(r["student_id"], to_date)} for r in rows]
+    result = []
+    for r in rows:
+        item = dict(r)
+        item["total_days"] = total_late_days(r["student_id"], to_date)
+        item["day_name"] = datetime.strptime(r["late_date"], "%Y-%m-%d").strftime("%A")
+        result.append(item)
+    return result
 
 
 def get_daily_records(day_text):
@@ -433,36 +439,53 @@ def build_excel_response(records, from_date, to_date):
     wb = Workbook()
     ws = wb.active
     ws.title = "Late Students"
-    ws.merge_cells("A1:I1")
-    title = f"Late Arrival Report - {from_date}" if from_date == to_date else f"Late Arrival Report - {from_date} to {to_date}"
+    ws.merge_cells("A1:J1")
+    title = f"Late/Absent Interval Report - {from_date}" if from_date == to_date else f"Late/Absent Interval Report - {from_date} to {to_date}"
     ws["A1"] = title
     ws["A1"].font = Font(size=16, bold=True)
     ws["A1"].alignment = Alignment(horizontal="center")
-    headers = ["No.", "Student Name", "Grade", "Section", "Late Date", "Late Time", "Total Late Days", "Recorded By", "Entry Created At"]
     ws.append([])
+    headers = ["No.", "Student Name", "Grade", "Section", "Late/Absent Day", "Late Date", "Late Time", "Total Late Days", "Recorded By", "Entry Created At"]
     ws.append(headers)
     for cell in ws[3]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="1F4E78")
         cell.alignment = Alignment(horizontal="center")
-    for i, r in enumerate(records, start=1):
-        ws.append([
-            i, r["student_name"], r["grade_name"], r["section_name"], r["late_date"], r["late_time"],
-            r["total_days"], f"{r['recorder_name'] or 'Unknown'} ({r['recorder_username'] or '-'})", r["created_at"]
-        ])
+
+    current_date = None
+    counter = 1
+    if records:
+        for r in records:
+            if r["late_date"] != current_date:
+                current_date = r["late_date"]
+                ws.append([])
+                group_row = ws.max_row
+                ws.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=10)
+                ws.cell(group_row, 1).value = f"{r['day_name']} - {r['late_date']}"
+                ws.cell(group_row, 1).font = Font(bold=True, color="FFFFFF")
+                ws.cell(group_row, 1).fill = PatternFill("solid", fgColor="5B9BD5")
+                ws.cell(group_row, 1).alignment = Alignment(horizontal="left")
+            ws.append([
+                counter, r["student_name"], r["grade_name"], r["section_name"], r["day_name"], r["late_date"], r["late_time"],
+                r["total_days"], f"{r['recorder_name'] or 'Unknown'} ({r['recorder_username'] or '-'})", r["created_at"]
+            ])
+            counter += 1
+    else:
+        ws.append(["No late/absent students recorded for this selected interval."])
+
     thin = Side(style="thin", color="B7B7B7")
-    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, min_col=1, max_col=9):
+    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, min_col=1, max_col=10):
         for cell in row:
             cell.border = Border(top=thin, bottom=thin, left=thin, right=thin)
             cell.alignment = Alignment(vertical="center")
-    widths = [8, 28, 14, 12, 14, 14, 18, 30, 22]
+    widths = [8, 28, 14, 12, 18, 14, 14, 18, 30, 22]
     for i, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
     suffix = from_date if from_date == to_date else f"{from_date}_to_{to_date}"
-    return send_file(bio, as_attachment=True, download_name=f"late_students_{suffix}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return send_file(bio, as_attachment=True, download_name=f"late_absent_interval_{suffix}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 def build_email_body(day_text):
