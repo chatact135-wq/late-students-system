@@ -1,5 +1,12 @@
 import os
 import sqlite3
+from urllib.parse import urlparse
+
+try:
+    import psycopg2
+    import psycopg2.extras
+except Exception:
+    psycopg2 = None
 from datetime import datetime, date, timedelta
 from functools import wraps
 from io import BytesIO
@@ -23,6 +30,8 @@ except Exception:
 
 APP_TITLE = "Smart Late Students System"
 DB_PATH = os.environ.get("DB_PATH", "late_students_dynamic.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_POSTGRES = bool(DATABASE_URL)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
@@ -46,7 +55,57 @@ SAMPLE_STUDENTS = {
 }
 
 
+class PostgresConnection:
+    def __init__(self, database_url):
+        if psycopg2 is None:
+            raise RuntimeError("psycopg2-binary is required for PostgreSQL. Add it to requirements.txt.")
+        self.conn = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type:
+            self.conn.rollback()
+        else:
+            self.conn.commit()
+        self.conn.close()
+
+    def commit(self):
+        self.conn.commit()
+
+    def execute(self, sql, params=()):
+        sql = adapt_sql_for_postgres(sql)
+        cur = self.conn.cursor()
+        cur.execute(sql, params or ())
+        return cur
+
+
+def adapt_sql_for_postgres(sql):
+    """Translate the small SQLite SQL subset used by this app to PostgreSQL."""
+    original = sql
+    sql = sql.replace("?", "%s")
+    sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+    sql = sql.replace("INSERT OR REPLACE INTO", "INSERT INTO")
+
+    compact = " ".join(sql.split())
+    if "INSERT INTO grades" in compact and "ON CONFLICT" not in compact:
+        sql += " ON CONFLICT (name) DO NOTHING"
+    elif "INSERT INTO sections" in compact and "ON CONFLICT" not in compact:
+        sql += " ON CONFLICT (grade_id, name) DO NOTHING"
+    elif "INSERT INTO students" in compact and "ON CONFLICT" not in compact:
+        sql += " ON CONFLICT (name, grade_id, section_id) DO NOTHING"
+    elif "INSERT INTO late_records" in compact and "ON CONFLICT" not in compact:
+        sql += " ON CONFLICT (student_id, late_date) DO UPDATE SET late_time=EXCLUDED.late_time, recorded_by=EXCLUDED.recorded_by, created_at=EXCLUDED.created_at"
+    elif "INSERT INTO email_recipients" in compact and "ON CONFLICT" not in compact:
+        sql += " ON CONFLICT (grade_id, email) DO UPDATE SET person_name=EXCLUDED.person_name, active=EXCLUDED.active, created_at=EXCLUDED.created_at"
+    return sql
+
+
 def get_conn():
+    if USE_POSTGRES:
+        return PostgresConnection(DATABASE_URL)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -54,7 +113,8 @@ def get_conn():
 
 def init_db():
     with get_conn() as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
+        if not USE_POSTGRES:
+            conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
