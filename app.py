@@ -1217,7 +1217,7 @@ def get_smtp_settings():
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     smtp_user = os.environ.get("SMTP_USER") or os.environ.get("MAIL_USERNAME")
     smtp_password = os.environ.get("SMTP_PASSWORD") or os.environ.get("MAIL_PASSWORD")
-    sender = os.environ.get("EMAIL_FROM", smtp_user or "")
+    sender = os.environ.get("SMTP_FROM") or os.environ.get("EMAIL_FROM") or smtp_user or ""
     return smtp_host, smtp_port, smtp_user, smtp_password, sender
 
 
@@ -1248,9 +1248,16 @@ def build_email_body(day_text, grade_name=None):
     return "\n".join(lines)
 
 def send_email_with_attachment(to_email, subject, body, attachment_bytes, filename):
+    """Send email safely without crashing the web page.
+
+    Supports Gmail/Office365 STARTTLS on port 587 and SSL on port 465.
+    A short timeout prevents Render/Gunicorn from killing the worker if SMTP
+    connection is blocked or slow.
+    """
     smtp_host, smtp_port, smtp_user, smtp_password, sender = get_smtp_settings()
     if not smtp_user or not smtp_password or not sender:
-        return False, "SMTP settings are missing. Add SMTP_USER and SMTP_PASSWORD in Render Environment."
+        return False, "SMTP settings are missing. Add SMTP_USER, SMTP_PASSWORD, SMTP_HOST, SMTP_PORT and SMTP_FROM in Render Environment."
+
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = sender
@@ -1262,11 +1269,26 @@ def send_email_with_attachment(to_email, subject, body, attachment_bytes, filena
         subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=filename,
     )
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.starttls()
-        server.login(smtp_user, smtp_password)
-        server.send_message(msg)
-    return True, "Email sent successfully."
+
+    try:
+        if int(smtp_port) == 465:
+            with smtplib.SMTP_SSL(smtp_host, int(smtp_port), timeout=15) as server:
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, int(smtp_port), timeout=15) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+        return True, "Email sent successfully."
+    except smtplib.SMTPAuthenticationError:
+        return False, "SMTP authentication failed. Check SMTP_USER and Gmail App Password. Do not use your normal Gmail password."
+    except (TimeoutError, OSError) as exc:
+        return False, f"SMTP connection failed or timed out. Try SMTP_PORT=465 with Gmail, or check that Render can reach {smtp_host}. Details: {str(exc)[:160]}"
+    except Exception as exc:
+        return False, f"Email sending failed: {type(exc).__name__}: {str(exc)[:180]}"
 
 
 def send_grade_email(grade_id, recipient_id, day_text=None):
