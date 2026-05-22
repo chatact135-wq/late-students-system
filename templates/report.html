@@ -1,6 +1,23 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="page-head"><div><h1>Daily Late Report</h1><p class="muted">Shows all late students, time, streak, and the user who recorded them.</p></div><a class="button" href="{{ url_for('export_daily_excel', date=today) }}">Export Excel</a></div>
-<form class="filters" method="get"><label>Date<input type="date" name="date" value="{{ today }}" onchange="this.form.submit()"></label></form>
-<table class="table"><thead><tr><th>#</th><th>Student</th><th>Grade</th><th>Section</th><th>Time</th><th>Streak</th><th>Recorded By</th></tr></thead><tbody>{% for r in records %}<tr><td>{{loop.index}}</td><td>{{r.student_name}}</td><td>{{r.grade_name}}</td><td>{{r.section_name}}</td><td>{{r.late_time}}</td><td>{{r.streak}}</td><td>{{r.recorder_name or 'Unknown'}} ({{r.recorder_username or '-'}})</td></tr>{% else %}<tr><td colspan="7" class="empty">No late students recorded for this date.</td></tr>{% endfor %}</tbody></table>
+<div class="page-head">
+  <div>
+    <h1>Late Report</h1>
+    <p class="muted">Export one selected day or a full period. The Excel includes all grades, all sections, the late date/time, total late days, and the user who recorded each entry.</p>
+  </div>
+  <a class="button" href="{{ url_for('export_late_report_excel', from_date=from_date, to_date=to_date) }}">Export Excel</a>
+</div>
+<form class="filters" method="get">
+  <label>From Date<input type="date" name="from_date" value="{{ from_date }}"></label>
+  <label>To Date<input type="date" name="to_date" value="{{ to_date }}"></label>
+  <button class="button" type="submit">Show Report</button>
+</form>
+<table class="table">
+  <thead><tr><th>#</th><th>Student</th><th>Grade</th><th>Section</th><th>Date</th><th>Time</th><th>Total Late Days</th><th>Recorded By</th></tr></thead>
+  <tbody>
+    {% for r in records %}
+    <tr><td>{{loop.index}}</td><td>{{r.student_name}}</td><td>{{r.grade_name}}</td><td>{{r.section_name}}</td><td>{{r.late_date}}</td><td>{{r.late_time}}</td><td>{{r.total_days}}</td><td>{{r.recorder_name or 'Unknown'}} ({{r.recorder_username or '-'}})</td></tr>
+    {% else %}<tr><td colspan="8" class="empty">No late students recorded for this date range.</td></tr>{% endfor %}
+  </tbody>
+</table>
 {% endblock %}

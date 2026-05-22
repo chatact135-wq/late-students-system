@@ -1,8 +1,11 @@
 {% extends 'base.html' %}
 {% block content %}
 <div class="page-head">
-  <div><h1>Late Arrival Registration</h1><p class="muted">Select grade and section, then click ✓ beside the student name.</p></div>
-  <a class="button" href="{{ url_for('export_daily_excel', date=today) }}">Download Today Excel</a>
+  <div>
+    <h1>Late Arrival Registration</h1>
+    <p class="muted">Choose any calendar date, then click ✓ beside the student. Today's page shows the total late days saved from all previous selected dates.</p>
+  </div>
+  <a class="button" href="{{ url_for('export_late_report_excel', from_date=today, to_date=today) }}">Download Selected Day Excel</a>
 </div>
 <form class="filters" method="get">
   <label>Grade
@@ -15,11 +18,11 @@
       {% for s in sections %}<option value="{{s.id}}" {% if s.id==selected_section %}selected{% endif %}>{{s.name}}</option>{% endfor %}
     </select>
   </label>
-  <label>Date<input type="date" name="date" value="{{ today }}" onchange="this.form.submit()"></label>
+  <label>Calendar Date<input type="date" name="date" value="{{ today }}" onchange="this.form.submit()"></label>
 </form>
-<div class="legend"><span class="dot yellow"></span> 1–3 consecutive days <span class="dot red"></span> 4+ consecutive days</div>
+<div class="legend"><span class="dot yellow"></span> 1–3 total late days <span class="dot red"></span> 4+ total late days</div>
 <table class="table cards-table">
-  <thead><tr><th>Student</th><th>Grade</th><th>Section</th><th>Status</th><th>Late Time</th><th>Action</th></tr></thead>
+  <thead><tr><th>Student</th><th>Grade</th><th>Section</th><th>Total Late Days</th><th>Late Time on Selected Date</th><th>Action</th></tr></thead>
   <tbody>
     {% for s in students %}
     <tr class="row-{{ s.color }}">
@@ -28,9 +31,19 @@
       <td>{{ s.late_time or '-' }}</td>
       <td>
         {% if s.late_time %}
-        <form method="post" action="{{ url_for('unmark_late', student_id=s.id) }}"><button class="danger" type="submit">Undo</button></form>
+        <form method="post" action="{{ url_for('unmark_late', student_id=s.id) }}">
+          <input type="hidden" name="date" value="{{ today }}">
+          <input type="hidden" name="grade_id" value="{{ selected_grade }}">
+          <input type="hidden" name="section_id" value="{{ selected_section }}">
+          <button class="danger" type="submit">Undo for this date</button>
+        </form>
         {% else %}
-        <form method="post" action="{{ url_for('mark_late', student_id=s.id) }}"><button class="check" type="submit">✓ Late</button></form>
+        <form method="post" action="{{ url_for('mark_late', student_id=s.id) }}">
+          <input type="hidden" name="date" value="{{ today }}">
+          <input type="hidden" name="grade_id" value="{{ selected_grade }}">
+          <input type="hidden" name="section_id" value="{{ selected_section }}">
+          <button class="check" type="submit">✓ Late</button>
+        </form>
         {% endif %}
       </td>
     </tr>
