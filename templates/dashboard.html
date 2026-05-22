@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Late Arrival Registration</h1><p class="muted">Select grade and section, then click ✓ beside the student name.</p></div>
+  <a class="button" href="{{ url_for('export_daily_excel', date=today) }}">Download Today Excel</a>
+</div>
+<form class="filters" method="get">
+  <label>Grade
+    <select name="grade_id" onchange="this.form.submit()">
+      {% for g in grades %}<option value="{{g.id}}" {% if g.id==selected_grade %}selected{% endif %}>{{g.name}}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Section
+    <select name="section_id" onchange="this.form.submit()">
+      {% for s in sections %}<option value="{{s.id}}" {% if s.id==selected_section %}selected{% endif %}>{{s.name}}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Date<input type="date" name="date" value="{{ today }}" onchange="this.form.submit()"></label>
+</form>
+<div class="legend"><span class="dot yellow"></span> 1–3 consecutive days <span class="dot red"></span> 4+ consecutive days</div>
+<table class="table cards-table">
+  <thead><tr><th>Student</th><th>Grade</th><th>Section</th><th>Status</th><th>Late Time</th><th>Action</th></tr></thead>
+  <tbody>
+    {% for s in students %}
+    <tr class="row-{{ s.color }}">
+      <td><b>{{ s.name }}</b></td><td>{{ s.grade_name }}</td><td>{{ s.section_name }}</td>
+      <td>{% if s.streak %}{{ s.streak }} day(s){% else %}Normal{% endif %}</td>
+      <td>{{ s.late_time or '-' }}</td>
+      <td>
+        {% if s.late_time %}
+        <form method="post" action="{{ url_for('unmark_late', student_id=s.id) }}"><button class="danger" type="submit">Undo</button></form>
+        {% else %}
+        <form method="post" action="{{ url_for('mark_late', student_id=s.id) }}"><button class="check" type="submit">✓ Late</button></form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}<tr><td colspan="6" class="empty">No students found. Admin can add grades, sections, and students.</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endblock %}

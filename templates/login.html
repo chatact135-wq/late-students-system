@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="login-card">
+  <h1>Login</h1>
+  <p class="muted">Admin default: <b>admin</b> / <b>admin123</b>. Change it in Render Environment Variables.</p>
+  <form method="post" class="form-grid">
+    <label>Username<input name="username" required autocomplete="username"></label>
+    <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
+    <button class="primary" type="submit">Login</button>
+  </form>
+</section>
+{% endblock %}
