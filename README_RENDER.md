@@ -135,3 +135,14 @@ Schedule for 8:30 AM UAE time:
 ```
 
 Render cron schedules are normally entered in UTC. UAE is UTC+4, so 8:30 AM UAE = 4:30 AM UTC.
+
+## Brevo Email Setup
+
+This version supports Brevo API for sending Excel reports.
+Add these Environment Variables in Render:
+
+EMAIL_PROVIDER=brevo
+BREVO_API_KEY=your_brevo_api_key
+EMAIL_FROM=Attendance System <your_verified_sender_email>
+
+The sender email must be verified inside Brevo. Recipients do not need verification.

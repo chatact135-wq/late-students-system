@@ -1258,21 +1258,75 @@ def _attachment_b64(attachment_bytes):
 def get_email_provider():
     """Choose the safest email provider for Render.
 
-    Preferred providers:
-      EMAIL_PROVIDER=resend   + RESEND_API_KEY
-      EMAIL_PROVIDER=sendgrid + SENDGRID_API_KEY
+    Preferred provider for this project:
+      EMAIL_PROVIDER=brevo + BREVO_API_KEY + EMAIL_FROM
 
-    SMTP remains as a fallback only, because some Render networks cannot reach
+    Resend, SendGrid, and SMTP remain as optional fallbacks only.
+    SMTP is not recommended on Render because some Render networks cannot reach
     smtp.gmail.com ports 465/587.
     """
     provider = (os.environ.get("EMAIL_PROVIDER") or "").strip().lower()
     if provider:
         return provider
+    if os.environ.get("BREVO_API_KEY"):
+        return "brevo"
     if os.environ.get("RESEND_API_KEY"):
         return "resend"
     if os.environ.get("SENDGRID_API_KEY"):
         return "sendgrid"
     return "smtp"
+
+
+def _parse_sender(sender_text):
+    """Return (name, email) from values like 'Attendance System <mail@example.com>'."""
+    sender_text = (sender_text or "").strip()
+    if "<" in sender_text and ">" in sender_text:
+        name = sender_text.split("<", 1)[0].strip().strip('"') or "Attendance System"
+        email = sender_text.split("<", 1)[1].split(">", 1)[0].strip()
+        return name, email
+    return "Attendance System", sender_text
+
+
+def send_email_brevo(to_email, subject, body, attachment_bytes, filename):
+    """Send email using Brevo Transactional Email API. Recommended on Render."""
+    api_key = os.environ.get("BREVO_API_KEY") or os.environ.get("SENDINBLUE_API_KEY")
+    sender = os.environ.get("EMAIL_FROM") or os.environ.get("BREVO_FROM") or os.environ.get("SMTP_FROM")
+    if not api_key or not sender:
+        return False, "Brevo settings are missing. Add BREVO_API_KEY and EMAIL_FROM in Render Environment."
+
+    sender_name, sender_email = _parse_sender(sender)
+    if not sender_email or "@" not in sender_email:
+        return False, "EMAIL_FROM is invalid. Use format: Attendance System <your_verified_sender@email.com>"
+
+    payload = {
+        "sender": {"name": sender_name, "email": sender_email},
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "textContent": body,
+        "attachment": [
+            {
+                "name": filename,
+                "content": _attachment_b64(attachment_bytes),
+            }
+        ],
+    }
+
+    try:
+        response = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "api-key": api_key,
+                "accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+        if 200 <= response.status_code < 300:
+            return True, "Email sent successfully using Brevo API."
+        return False, f"Brevo API error {response.status_code}: {response.text[:400]}"
+    except requests.RequestException as exc:
+        return False, f"Brevo connection failed: {str(exc)[:220]}"
 
 
 def send_email_resend(to_email, subject, body, attachment_bytes, filename):
@@ -1351,7 +1405,7 @@ def send_email_smtp(to_email, subject, body, attachment_bytes, filename):
     """Fallback SMTP sender. API providers are recommended on Render."""
     smtp_host, smtp_port, smtp_user, smtp_password, sender = get_smtp_settings()
     if not smtp_user or not smtp_password or not sender:
-        return False, "SMTP settings are missing. Add SMTP_USER, SMTP_PASSWORD, SMTP_HOST, SMTP_PORT and SMTP_FROM in Render Environment, or use RESEND_API_KEY / SENDGRID_API_KEY."
+        return False, "SMTP settings are missing. Add SMTP_USER, SMTP_PASSWORD, SMTP_HOST, SMTP_PORT and SMTP_FROM in Render Environment, or use BREVO_API_KEY."
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -1381,7 +1435,7 @@ def send_email_smtp(to_email, subject, body, attachment_bytes, filename):
     except smtplib.SMTPAuthenticationError:
         return False, "SMTP authentication failed. Check SMTP_USER and Gmail App Password. Do not use your normal Gmail password."
     except (TimeoutError, OSError) as exc:
-        return False, f"SMTP connection failed or timed out. Render may block SMTP. Use Resend or SendGrid API. Details: {str(exc)[:160]}"
+        return False, f"SMTP connection failed or timed out. Render may block SMTP. Use Brevo API. Details: {str(exc)[:160]}"
     except Exception as exc:
         return False, f"SMTP email sending failed: {type(exc).__name__}: {str(exc)[:180]}"
 
@@ -1389,13 +1443,15 @@ def send_email_smtp(to_email, subject, body, attachment_bytes, filename):
 def send_email_with_attachment(to_email, subject, body, attachment_bytes, filename):
     """Send Excel report using an Email API first, SMTP only as fallback."""
     provider = get_email_provider()
+    if provider == "brevo":
+        return send_email_brevo(to_email, subject, body, attachment_bytes, filename)
     if provider == "resend":
         return send_email_resend(to_email, subject, body, attachment_bytes, filename)
     if provider == "sendgrid":
         return send_email_sendgrid(to_email, subject, body, attachment_bytes, filename)
     if provider == "smtp":
         return send_email_smtp(to_email, subject, body, attachment_bytes, filename)
-    return False, "Invalid EMAIL_PROVIDER. Use resend, sendgrid, or smtp."
+    return False, "Invalid EMAIL_PROVIDER. Use brevo, resend, sendgrid, or smtp."
 
 
 def send_grade_email(grade_id, recipient_id, day_text=None):
