@@ -1,6 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Admin Panel</h1>
+<p><a class="primary-link" href="{{ url_for('admin_email') }}">Open Email Center: recipients, daily Excel email, and manual sending</a></p>
 <div class="admin-grid">
   <section class="panel"><h2>Add Grade</h2><form method="post" action="{{ url_for('add_grade') }}" class="form-grid"><input name="name" placeholder="Grade 9" required><input name="sort_order" type="number" placeholder="Sort order"><button class="primary">Add Grade</button></form></section>
   <section class="panel"><h2>Add Section</h2><form method="post" action="{{ url_for('add_section') }}" class="form-grid"><select name="grade_id">{% for g in grades %}<option value="{{g.id}}">{{g.name}}</option>{% endfor %}</select><input name="name" placeholder="9A" required><button class="primary">Add Section</button></form></section>

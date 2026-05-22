@@ -106,6 +106,18 @@ def init_db():
             FOREIGN KEY(recorded_by) REFERENCES users(id) ON DELETE SET NULL
         )
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_recipients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            grade_id INTEGER NOT NULL,
+            person_name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            UNIQUE(grade_id, email),
+            FOREIGN KEY(grade_id) REFERENCES grades(id) ON DELETE CASCADE
+        )
+        """)
         ensure_seed_data(conn)
         conn.commit()
 
@@ -385,6 +397,59 @@ def toggle_user(user_id):
     return redirect(url_for("admin_home"))
 
 
+@app.post("/admin/email-recipients")
+@login_required
+@admin_required
+def add_email_recipient():
+    now = datetime.now().isoformat(timespec="seconds")
+    grade_id = request.form.get("grade_id", type=int)
+    person_name = request.form.get("person_name", "").strip()
+    email = request.form.get("email", "").strip()
+    if not grade_id or not person_name or not email:
+        flash("Grade, recipient name, and email are required.", "error")
+        return redirect(url_for("admin_home"))
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO email_recipients(grade_id, person_name, email, active, created_at)
+            VALUES (?, ?, ?, 1, ?)
+        """, (grade_id, person_name, email, now))
+        conn.commit()
+    flash("Email recipient saved successfully.", "success")
+    return redirect(url_for("admin_email"))
+
+
+@app.post("/admin/email-recipients/<int:recipient_id>/toggle")
+@login_required
+@admin_required
+def toggle_email_recipient(recipient_id):
+    with get_conn() as conn:
+        conn.execute("UPDATE email_recipients SET active = CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?", (recipient_id,))
+        conn.commit()
+    return redirect(url_for("admin_email"))
+
+
+@app.route("/admin/email", methods=["GET", "POST"])
+@login_required
+@admin_required
+def admin_email():
+    today_iso = date.today().isoformat()
+    with get_conn() as conn:
+        grades = conn.execute("SELECT * FROM grades ORDER BY sort_order, name").fetchall()
+        recipients = conn.execute("""
+            SELECT er.*, g.name AS grade_name
+            FROM email_recipients er JOIN grades g ON g.id=er.grade_id
+            ORDER BY g.sort_order, er.person_name
+        """).fetchall()
+    if request.method == "POST":
+        grade_id = request.form.get("grade_id", type=int)
+        recipient_id = request.form.get("recipient_id", type=int)
+        day_text = parse_date_or_today(request.form.get("report_date") or today_iso)
+        ok, message = send_grade_email(grade_id, recipient_id, day_text)
+        flash(message, "success" if ok else "error")
+        return redirect(url_for("admin_email"))
+    return render_template("admin_email.html", grades=grades, recipients=recipients, today=today_iso)
+
+
 @app.route("/report")
 @login_required
 def report():
@@ -397,19 +462,24 @@ def report():
     return render_template("report.html", records=records, from_date=from_date, to_date=to_date, today=today_iso)
 
 
-def get_records_range(from_date, to_date):
+def get_records_range(from_date, to_date, grade_id=None):
+    params = [from_date, to_date]
+    grade_filter = ""
+    if grade_id:
+        grade_filter = " AND g.id=?"
+        params.append(int(grade_id))
     with get_conn() as conn:
-        rows = conn.execute("""
-            SELECT r.*, st.name AS student_name, g.name AS grade_name, sec.name AS section_name,
+        rows = conn.execute(f"""
+            SELECT r.*, st.name AS student_name, g.id AS grade_id, g.name AS grade_name, sec.name AS section_name,
                    u.full_name AS recorder_name, u.username AS recorder_username
             FROM late_records r
             JOIN students st ON st.id=r.student_id
             JOIN grades g ON g.id=st.grade_id
             JOIN sections sec ON sec.id=st.section_id
             LEFT JOIN users u ON u.id=r.recorded_by
-            WHERE r.late_date BETWEEN ? AND ?
+            WHERE r.late_date BETWEEN ? AND ?{grade_filter}
             ORDER BY r.late_date, g.sort_order, sec.name, st.name, r.late_time
-        """, (from_date, to_date)).fetchall()
+        """, params).fetchall()
     result = []
     for r in rows:
         item = dict(r)
@@ -431,8 +501,9 @@ def export_late_report_excel():
     to_date = parse_date_or_today(request.args.get("to_date") or from_date)
     if from_date > to_date:
         from_date, to_date = to_date, from_date
-    records = get_records_range(from_date, to_date)
-    return build_excel_response(records, from_date, to_date)
+    grade_id = request.args.get("grade_id", type=int)
+    records = get_records_range(from_date, to_date, grade_id=grade_id)
+    return build_excel_response(records, from_date, to_date, grade_id=grade_id)
 
 
 @app.route("/export/daily.xlsx")
@@ -459,17 +530,19 @@ def each_date_between(from_date, to_date):
         start += timedelta(days=1)
 
 
-def all_grades_for_excel():
+def all_grades_for_excel(grade_id=None):
     with get_conn() as conn:
+        if grade_id:
+            return conn.execute("SELECT id, name, sort_order FROM grades WHERE id=? ORDER BY sort_order, name", (int(grade_id),)).fetchall()
         return conn.execute("SELECT id, name, sort_order FROM grades ORDER BY sort_order, name").fetchall()
 
 
-def build_excel_response(records, from_date, to_date):
+def build_excel_workbook_bytes(records, from_date, to_date, grade_id=None):
     wb = Workbook()
     default_ws = wb.active
     wb.remove(default_ws)
 
-    grades = all_grades_for_excel()
+    grades = all_grades_for_excel(grade_id)
     records_by_grade_date = {}
     for r in records:
         records_by_grade_date.setdefault(r["grade_name"], {}).setdefault(r["late_date"], []).append(r)
@@ -609,11 +682,21 @@ def build_excel_response(records, from_date, to_date):
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
+    return bio
+
+
+def build_excel_response(records, from_date, to_date, grade_id=None):
+    bio = build_excel_workbook_bytes(records, from_date, to_date, grade_id=grade_id)
     suffix = from_date if from_date == to_date else f"{from_date}_to_{to_date}"
+    grade_part = "all_grades"
+    if grade_id:
+        with get_conn() as conn:
+            g = conn.execute("SELECT name FROM grades WHERE id=?", (int(grade_id),)).fetchone()
+        grade_part = sanitize_sheet_name(g["name"] if g else f"grade_{grade_id}").replace(" ", "_")
     return send_file(
         bio,
         as_attachment=True,
-        download_name=f"late_absent_interval_{suffix}.xlsx",
+        download_name=f"late_absent_{grade_part}_{suffix}.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -1129,39 +1212,110 @@ def chatbot():
     return render_template('chatbot.html', question=question, answer=answer)
 
 
-def build_email_body(day_text):
-    records = get_daily_records(day_text)
-    if not records:
-        return f"Daily Late Arrival Report - {day_text}\n\nNo late students recorded today."
-    lines = [f"Daily Late Arrival Report - {day_text}", "", "Student | Grade | Section | Date | Time | Total Days | Recorded By", "-"*90]
-    for r in records:
-        lines.append(f"{r['student_name']} | {r['grade_name']} | {r['section_name']} | {r['late_date']} | {r['late_time']} | {r['total_days']} | {r['recorder_name'] or 'Unknown'}")
-    return "\n".join(lines)
-
-
-def send_daily_email():
-    recipients = [x.strip() for x in os.environ.get("REPORT_RECIPIENTS", "").split(",") if x.strip()]
-    if not recipients:
-        print("REPORT_RECIPIENTS is empty. Email skipped.")
-        return
+def get_smtp_settings():
     smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-    smtp_user = os.environ.get("SMTP_USER")
-    smtp_password = os.environ.get("SMTP_PASSWORD")
-    sender = os.environ.get("EMAIL_FROM", smtp_user)
+    smtp_user = os.environ.get("SMTP_USER") or os.environ.get("MAIL_USERNAME")
+    smtp_password = os.environ.get("SMTP_PASSWORD") or os.environ.get("MAIL_PASSWORD")
+    sender = os.environ.get("EMAIL_FROM", smtp_user or "")
+    return smtp_host, smtp_port, smtp_user, smtp_password, sender
+
+
+def build_email_body(day_text, grade_name=None):
+    title_grade = f" - {grade_name}" if grade_name else ""
+    records = get_records_range(day_text, day_text)
+    if grade_name:
+        records = [r for r in records if r["grade_name"] == grade_name]
+    if not records:
+        return (
+            f"Daily Late/Absent Report{title_grade} - {day_text}\n\n"
+            "No late/absent students recorded today.\n\n"
+            "This email was generated automatically by the Smart Late Students System."
+        )
+    lines = [
+        f"Daily Late/Absent Report{title_grade} - {day_text}",
+        "",
+        "Student | Grade | Section | Date | Time | Total Days | Recorded By",
+        "-" * 95,
+    ]
+    for r in records:
+        lines.append(
+            f"{r['student_name']} | {r['grade_name']} | {r['section_name']} | "
+            f"{r['late_date']} | {r['late_time']} | {r['total_days']} | "
+            f"{r['recorder_name'] or 'Unknown'}"
+        )
+    lines.append("\nAttached: official Excel report for printing/submission.")
+    return "\n".join(lines)
+
+def send_email_with_attachment(to_email, subject, body, attachment_bytes, filename):
+    smtp_host, smtp_port, smtp_user, smtp_password, sender = get_smtp_settings()
     if not smtp_user or not smtp_password or not sender:
-        print("SMTP settings missing. Email skipped.")
-        return
-    day_text = date.today().isoformat()
+        return False, "SMTP settings are missing. Add SMTP_USER and SMTP_PASSWORD in Render Environment."
     msg = EmailMessage()
-    msg["Subject"] = f"Daily Late Arrival Report - {day_text}"
+    msg["Subject"] = subject
     msg["From"] = sender
-    msg["To"] = ", ".join(recipients)
-    msg.set_content(build_email_body(day_text))
+    msg["To"] = to_email
+    msg.set_content(body)
+    msg.add_attachment(
+        attachment_bytes.getvalue(),
+        maintype="application",
+        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=filename,
+    )
     with smtplib.SMTP(smtp_host, smtp_port) as server:
         server.starttls()
         server.login(smtp_user, smtp_password)
         server.send_message(msg)
+    return True, "Email sent successfully."
+
+
+def send_grade_email(grade_id, recipient_id, day_text=None):
+    day_text = day_text or date.today().isoformat()
+    with get_conn() as conn:
+        grade = conn.execute("SELECT * FROM grades WHERE id=?", (int(grade_id),)).fetchone() if grade_id else None
+        recipient = conn.execute("SELECT * FROM email_recipients WHERE id=? AND active=1", (int(recipient_id),)).fetchone() if recipient_id else None
+    if not grade:
+        return False, "Please select a valid grade."
+    if not recipient:
+        return False, "Please select an active recipient."
+    if recipient["grade_id"] != grade["id"]:
+        return False, "The selected recipient is not assigned to this grade."
+    records = get_records_range(day_text, day_text, grade_id=grade["id"])
+    excel_bytes = build_excel_workbook_bytes(records, day_text, day_text, grade_id=grade["id"])
+    safe_grade = sanitize_sheet_name(grade["name"]).replace(" ", "_")
+    filename = f"late_absent_{safe_grade}_{day_text}.xlsx"
+    subject = f"Daily Late/Absent Report - {grade['name']} - {day_text}"
+    body = build_email_body(day_text, grade_name=grade["name"])
+    return send_email_with_attachment(recipient["email"], subject, body, excel_bytes, filename)
+
+
+def send_daily_email():
+    """Send one daily Excel email per active grade recipient.
+
+    Schedule this through Render Cron Job at 08:30 using: python cron.py
+    """
+    day_text = date.today().isoformat()
+    sent = 0
+    errors = []
+    with get_conn() as conn:
+        recipients = conn.execute("""
+            SELECT er.*, g.name AS grade_name
+            FROM email_recipients er JOIN grades g ON g.id=er.grade_id
+            WHERE er.active=1
+            ORDER BY g.sort_order, er.person_name
+        """).fetchall()
+    if not recipients:
+        print("No active email recipients configured. Email skipped.")
+        return
+    for rec in recipients:
+        ok, message = send_grade_email(rec["grade_id"], rec["id"], day_text)
+        if ok:
+            sent += 1
+            print(f"Sent daily report to {rec['person_name']} <{rec['email']}> for {rec['grade_name']}")
+        else:
+            errors.append(f"{rec['email']}: {message}")
+            print(f"Failed daily report to {rec['email']}: {message}")
+    print(f"Daily email complete. Sent: {sent}. Errors: {len(errors)}")
 
 
 @app.route("/send-report-now")

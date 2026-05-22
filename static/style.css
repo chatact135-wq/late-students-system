@@ -82,3 +82,55 @@
 @media (max-width: 760px) {
   .risk-cards { grid-template-columns: 1fr; }
 }
+
+/* UX polish: hover effects + loading overlay */
+a, button, .primary, .danger { transition: all 0.18s ease-in-out; }
+a:hover { transform: translateY(-1px); opacity: 0.9; }
+.navlinks a:hover, .primary-link:hover {
+  background: rgba(255,255,255,0.16);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+}
+button:hover, .primary:hover, .danger:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.16);
+  filter: brightness(1.03);
+}
+.panel:hover, .card:hover, .export-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.10);
+}
+.panel, .card, .export-card { transition: all 0.2s ease-in-out; }
+.primary-link {
+  display: inline-block;
+  background: #1f4e78;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 10px;
+  text-decoration: none;
+  font-weight: 700;
+}
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(255,255,255,0.82);
+  backdrop-filter: blur(4px);
+  z-index: 9999;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 14px;
+  font-weight: 700;
+  color: #1f4e78;
+}
+.loading-overlay.show { display: flex; }
+.spinner {
+  width: 46px;
+  height: 46px;
+  border: 5px solid #d9eaf7;
+  border-top-color: #1f4e78;
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.muted { color: #64748b; }

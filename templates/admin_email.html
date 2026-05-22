@@ -1,0 +1,80 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Email Center</h1>
+<p class="muted">Send today's grade-specific Excel report manually, or configure recipients for the automatic 8:30 daily email.</p>
+
+<div class="admin-grid">
+  <section class="panel">
+    <h2>Add Email Recipient</h2>
+    <form method="post" action="{{ url_for('add_email_recipient') }}" class="form-grid loading-form">
+      <select name="grade_id" required>
+        {% for g in grades %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
+      </select>
+      <input name="person_name" placeholder="Recipient name / اسم الشخص" required>
+      <input name="email" type="email" placeholder="email@example.com" required>
+      <button class="primary">Save Recipient</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Send Today's Excel Report</h2>
+    <form method="post" action="{{ url_for('admin_email') }}" class="form-grid loading-form">
+      <label>Report Date</label>
+      <input name="report_date" type="date" value="{{ today }}" required>
+      <label>Grade</label>
+      <select name="grade_id" id="email-grade" required>
+        {% for g in grades %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
+      </select>
+      <label>Recipient</label>
+      <select name="recipient_id" id="email-recipient" required>
+        {% for r in recipients %}
+          {% if r.active %}<option value="{{ r.id }}" data-grade="{{ r.grade_id }}">{{ r.person_name }} — {{ r.email }} ({{ r.grade_name }})</option>{% endif %}
+        {% endfor %}
+      </select>
+      <button class="primary">Send Email With Excel Attachment</button>
+    </form>
+  </section>
+</div>
+
+<section class="panel wide">
+  <h2>Configured Email Recipients</h2>
+  <table class="table">
+    <thead><tr><th>Grade</th><th>Recipient Name</th><th>Email</th><th>Status</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for r in recipients %}
+      <tr>
+        <td>{{ r.grade_name }}</td>
+        <td>{{ r.person_name }}</td>
+        <td>{{ r.email }}</td>
+        <td>{{ 'Active' if r.active else 'Inactive' }}</td>
+        <td>
+          <form method="post" action="{{ url_for('toggle_email_recipient', recipient_id=r.id) }}" class="loading-form">
+            <button class="danger">{{ 'Deactivate' if r.active else 'Activate' }}</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">No recipients added yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<script>
+function filterRecipients(){
+  const grade = document.getElementById('email-grade');
+  const recipient = document.getElementById('email-recipient');
+  if(!grade || !recipient) return;
+  let firstVisible = null;
+  [...recipient.options].forEach(opt => {
+    const show = opt.dataset.grade === grade.value;
+    opt.hidden = !show;
+    opt.disabled = !show;
+    if(show && !firstVisible) firstVisible = opt;
+  });
+  if(firstVisible) recipient.value = firstVisible.value;
+}
+document.getElementById('email-grade')?.addEventListener('change', filterRecipients);
+filterRecipients();
+</script>
+{% endblock %}

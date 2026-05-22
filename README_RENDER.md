@@ -91,3 +91,47 @@ OPENAI_MODEL=gpt-5.5
 ```
 
 If your OpenAI account does not have access to the selected model, change `OPENAI_MODEL` to another model available in your account.
+
+## Email Center + Automatic Daily Email
+
+This version includes an Admin Email Center:
+
+- Add one or more recipients for each grade.
+- Send today's Excel report manually by grade.
+- Automatic daily report sends one grade-specific Excel attachment to each active recipient.
+
+### Required Render Environment Variables for email
+
+Add these in Render > Web Service > Environment:
+
+```text
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASSWORD=your_gmail_app_password
+EMAIL_FROM=your_email@gmail.com
+CRON_SECRET=choose-any-secure-secret
+```
+
+For Gmail, use a Gmail App Password, not your normal Gmail password.
+
+### Render Cron Job
+
+Create a Render Cron Job using the same GitHub repository.
+
+Build Command:
+```bash
+pip install -r requirements.txt
+```
+
+Command:
+```bash
+python cron.py
+```
+
+Schedule for 8:30 AM UAE time:
+```text
+30 4 * * *
+```
+
+Render cron schedules are normally entered in UTC. UAE is UTC+4, so 8:30 AM UAE = 4:30 AM UTC.
