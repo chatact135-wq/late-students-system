@@ -435,57 +435,180 @@ def export_daily_excel():
     return export_late_report_excel()
 
 
+def sanitize_sheet_name(name):
+    """Clean invalid Excel sheet-name characters and keep length <= 31."""
+    bad_chars = ['\\', '/', '?', '*', '[', ']', ':']
+    clean = str(name or "Sheet")
+    for ch in bad_chars:
+        clean = clean.replace(ch, '-')
+    return clean[:31] or "Sheet"
+
+
+def each_date_between(from_date, to_date):
+    start = datetime.strptime(from_date, "%Y-%m-%d").date()
+    end = datetime.strptime(to_date, "%Y-%m-%d").date()
+    while start <= end:
+        yield start.isoformat(), start.strftime("%A")
+        start += timedelta(days=1)
+
+
+def all_grades_for_excel():
+    with get_conn() as conn:
+        return conn.execute("SELECT id, name, sort_order FROM grades ORDER BY sort_order, name").fetchall()
+
+
 def build_excel_response(records, from_date, to_date):
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Late Students"
-    ws.merge_cells("A1:J1")
-    title = f"Late/Absent Interval Report - {from_date}" if from_date == to_date else f"Late/Absent Interval Report - {from_date} to {to_date}"
-    ws["A1"] = title
-    ws["A1"].font = Font(size=16, bold=True)
-    ws["A1"].alignment = Alignment(horizontal="center")
-    ws.append([])
-    headers = ["No.", "Student Name", "Grade", "Section", "Late/Absent Day", "Late Date", "Late Time", "Total Late Days", "Recorded By", "Entry Created At"]
-    ws.append(headers)
-    for cell in ws[3]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="1F4E78")
-        cell.alignment = Alignment(horizontal="center")
+    default_ws = wb.active
+    wb.remove(default_ws)
 
-    current_date = None
-    counter = 1
-    if records:
-        for r in records:
-            if r["late_date"] != current_date:
-                current_date = r["late_date"]
-                ws.append([])
-                group_row = ws.max_row
-                ws.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=10)
-                ws.cell(group_row, 1).value = f"{r['day_name']} - {r['late_date']}"
-                ws.cell(group_row, 1).font = Font(bold=True, color="FFFFFF")
-                ws.cell(group_row, 1).fill = PatternFill("solid", fgColor="5B9BD5")
-                ws.cell(group_row, 1).alignment = Alignment(horizontal="left")
-            ws.append([
-                counter, r["student_name"], r["grade_name"], r["section_name"], r["day_name"], r["late_date"], r["late_time"],
-                r["total_days"], f"{r['recorder_name'] or 'Unknown'} ({r['recorder_username'] or '-'})", r["created_at"]
-            ])
-            counter += 1
-    else:
-        ws.append(["No late/absent students recorded for this selected interval."])
+    grades = all_grades_for_excel()
+    records_by_grade_date = {}
+    for r in records:
+        records_by_grade_date.setdefault(r["grade_name"], {}).setdefault(r["late_date"], []).append(r)
 
-    thin = Side(style="thin", color="B7B7B7")
-    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, min_col=1, max_col=10):
-        for cell in row:
-            cell.border = Border(top=thin, bottom=thin, left=thin, right=thin)
-            cell.alignment = Alignment(vertical="center")
-    widths = [8, 28, 14, 12, 18, 14, 14, 18, 30, 22]
-    for i, width in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = width
+    # Professional colors
+    dark_blue = "1F4E78"
+    light_blue = "5B9BD5"
+    pale_blue = "D9EAF7"
+    yellow = "FFF2CC"
+    red = "F4CCCC"
+    white = "FFFFFF"
+    grey = "F2F2F2"
+    border_color = "B7B7B7"
+
+    headers = [
+        "No.",
+        "Student Name",
+        "Grade",
+        "Section",
+        "Late/Absent Day",
+        "Date",
+        "Late Time",
+        "Total Late Days",
+        "Recorded By",
+        "Username",
+        "Entry Created At",
+    ]
+
+    if not grades:
+        # Fallback sheet in the unlikely case the admin has removed all grades.
+        grades = [{"name": "No Grades", "sort_order": 0}]
+
+    used_sheet_names = set()
+    for grade in grades:
+        grade_name = grade["name"]
+        base_name = sanitize_sheet_name(grade_name)
+        sheet_name = base_name
+        n = 2
+        while sheet_name in used_sheet_names:
+            suffix = f" {n}"
+            sheet_name = sanitize_sheet_name(base_name[:31-len(suffix)] + suffix)
+            n += 1
+        used_sheet_names.add(sheet_name)
+
+        ws = wb.create_sheet(sheet_name)
+        ws.sheet_view.rightToLeft = False
+        title = f"{grade_name} - Late/Absent Interval Report"
+        period = f"Period: {from_date}" if from_date == to_date else f"Period: {from_date} to {to_date}"
+
+        ws.merge_cells("A1:K1")
+        ws["A1"] = title
+        ws["A1"].font = Font(size=16, bold=True, color=white)
+        ws["A1"].fill = PatternFill("solid", fgColor=dark_blue)
+        ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[1].height = 28
+
+        ws.merge_cells("A2:K2")
+        total_records_for_grade = sum(len(v) for v in records_by_grade_date.get(grade_name, {}).values())
+        ws["A2"] = f"{period} | Total records in this grade: {total_records_for_grade}"
+        ws["A2"].font = Font(size=11, bold=True, color="1F1F1F")
+        ws["A2"].fill = PatternFill("solid", fgColor=pale_blue)
+        ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
+
+        header_row = 4
+        for col, header in enumerate(headers, start=1):
+            cell = ws.cell(header_row, col)
+            cell.value = header
+            cell.font = Font(bold=True, color=white)
+            cell.fill = PatternFill("solid", fgColor=dark_blue)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[header_row].height = 24
+        ws.freeze_panes = "A5"
+
+        counter = 1
+        records_for_grade = records_by_grade_date.get(grade_name, {})
+        for day_iso, day_name in each_date_between(from_date, to_date):
+            group_row = ws.max_row + 1
+            ws.merge_cells(start_row=group_row, start_column=1, end_row=group_row, end_column=11)
+            group_cell = ws.cell(group_row, 1)
+            group_cell.value = f"{day_name} - {day_iso}"
+            group_cell.font = Font(bold=True, color=white)
+            group_cell.fill = PatternFill("solid", fgColor=light_blue)
+            group_cell.alignment = Alignment(horizontal="left", vertical="center")
+            ws.row_dimensions[group_row].height = 21
+
+            day_records = records_for_grade.get(day_iso, [])
+            if day_records:
+                for r in day_records:
+                    ws.append([
+                        counter,
+                        r["student_name"],
+                        r["grade_name"],
+                        r["section_name"],
+                        r["day_name"],
+                        r["late_date"],
+                        r["late_time"],
+                        r["total_days"],
+                        r["recorder_name"] or "Unknown",
+                        r["recorder_username"] or "-",
+                        r["created_at"],
+                    ])
+                    data_row = ws.max_row
+                    total_cell = ws.cell(data_row, 8)
+                    if (r["total_days"] or 0) >= 4:
+                        total_cell.fill = PatternFill("solid", fgColor=red)
+                    elif (r["total_days"] or 0) >= 1:
+                        total_cell.fill = PatternFill("solid", fgColor=yellow)
+                    counter += 1
+            else:
+                ws.append(["", "No late/absent students recorded", grade_name, "", day_name, day_iso, "", "", "", "", ""])
+                no_row = ws.max_row
+                for col in range(1, 12):
+                    ws.cell(no_row, col).fill = PatternFill("solid", fgColor=grey)
+                ws.cell(no_row, 2).font = Font(italic=True, color="666666")
+
+        # Formatting and print readiness
+        thin = Side(style="thin", color=border_color)
+        for row in ws.iter_rows(min_row=4, max_row=ws.max_row, min_col=1, max_col=11):
+            for cell in row:
+                cell.border = Border(top=thin, bottom=thin, left=thin, right=thin)
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+        widths = [7, 30, 13, 12, 18, 14, 13, 17, 24, 16, 22]
+        for i, width in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+        ws.auto_filter.ref = f"A4:K{ws.max_row}"
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_title_rows = "1:4"
+        ws.page_margins.left = 0.25
+        ws.page_margins.right = 0.25
+        ws.page_margins.top = 0.5
+        ws.page_margins.bottom = 0.5
+
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
     suffix = from_date if from_date == to_date else f"{from_date}_to_{to_date}"
-    return send_file(bio, as_attachment=True, download_name=f"late_absent_interval_{suffix}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return send_file(
+        bio,
+        as_attachment=True,
+        download_name=f"late_absent_interval_{suffix}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 def build_email_body(day_text):
