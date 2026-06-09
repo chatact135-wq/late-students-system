@@ -11,6 +11,13 @@
 <form class="filters" method="get">
   <label>From Date<input type="date" name="from_date" value="{{ from_date }}"></label>
   <label>To Date<input type="date" name="to_date" value="{{ to_date }}"></label>
+  <label>Rows per page
+    <select name="per_page">
+      <option value="30" {% if per_page == 30 %}selected{% endif %}>30</option>
+      <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
+      <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+    </select>
+  </label>
   <button class="button" type="submit">Generate AI Report</button>
 </form>
 
@@ -24,27 +31,18 @@
   <div class="risk-card medium">Medium Risk<br><strong>{{ report|selectattr('risk','equalto','Medium')|list|length }}</strong></div>
   <div class="risk-card low">Low Risk<br><strong>{{ report|selectattr('risk','equalto','Low')|list|length }}</strong></div>
 </div>
+<p class="muted">Showing {{ report|length }} of {{ total_records }} students · Page {{ page }} of {{ total_pages }}</p>
 
 <table class="table">
   <thead>
     <tr>
-      <th>#</th>
-      <th>Student</th>
-      <th>Grade</th>
-      <th>Section</th>
-      <th>Total Late Days<br><small>Selected Period</small></th>
-      <th>Total Late Days<br><small>Historical</small></th>
-      <th>Consecutive Days</th>
-      <th>Repeated Weekday Pattern<br><small>Across Weeks</small></th>
-      <th>AI Risk</th>
-      <th>AI Reasons</th>
-      <th>AI Recommendation</th>
+      <th>#</th><th>Student</th><th>Grade</th><th>Section</th><th>Total Late Days<br><small>Selected Period</small></th><th>Total Late Days<br><small>Historical</small></th><th>Consecutive Days</th><th>Repeated Weekday Pattern<br><small>Across Weeks</small></th><th>AI Risk</th><th>AI Reasons</th><th>AI Recommendation</th>
     </tr>
   </thead>
   <tbody>
     {% for r in report %}
     <tr class="risk-row {{ r.risk|lower }}">
-      <td>{{ loop.index }}</td>
+      <td>{{ start_index + loop.index }}</td>
       <td>{{ r.student_name }}</td>
       <td>{{ r.grade_name }}</td>
       <td>{{ r.section_name }}</td>
@@ -67,4 +65,11 @@
     {% endfor %}
   </tbody>
 </table>
+{% if total_pages > 1 %}
+<div class="pagination">
+  {% if page > 1 %}<a class="button" href="{{ url_for('ai_report', from_date=from_date, to_date=to_date, per_page=per_page, page=page-1) }}">Previous</a>{% endif %}
+  <span>Page {{ page }} / {{ total_pages }}</span>
+  {% if page < total_pages %}<a class="button" href="{{ url_for('ai_report', from_date=from_date, to_date=to_date, per_page=per_page, page=page+1) }}">Next</a>{% endif %}
+</div>
+{% endif %}
 {% endblock %}

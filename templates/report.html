@@ -10,14 +10,29 @@
 <form class="filters" method="get">
   <label>From Date<input type="date" name="from_date" value="{{ from_date }}"></label>
   <label>To Date<input type="date" name="to_date" value="{{ to_date }}"></label>
+  <label>Rows per page
+    <select name="per_page">
+      <option value="30" {% if per_page == 30 %}selected{% endif %}>30</option>
+      <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
+      <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+    </select>
+  </label>
   <button class="button" type="submit">Show Report</button>
 </form>
+<p class="muted">Showing {{ records|length }} of {{ total_records }} records · Page {{ page }} of {{ total_pages }}</p>
 <table class="table">
   <thead><tr><th>#</th><th>Student</th><th>Grade</th><th>Section</th><th>Late/Absent Day</th><th>Date</th><th>Time</th><th>Total Late Days</th><th>Recorded By</th></tr></thead>
   <tbody>
     {% for r in records %}
-    <tr><td>{{loop.index}}</td><td>{{r.student_name}}</td><td>{{r.grade_name}}</td><td>{{r.section_name}}</td><td>{{r.day_name}}</td><td>{{r.late_date}}</td><td>{{r.late_time}}</td><td>{{r.total_days}}</td><td>{{r.recorder_name or 'Unknown'}} ({{r.recorder_username or '-'}})</td></tr>
+    <tr><td>{{start_index + loop.index}}</td><td>{{r.student_name}}</td><td>{{r.grade_name}}</td><td>{{r.section_name}}</td><td>{{r.day_name}}</td><td>{{r.late_date}}</td><td>{{r.late_time}}</td><td>{{r.total_days}}</td><td>{{r.recorder_name or 'Unknown'}} ({{r.recorder_username or '-'}})</td></tr>
     {% else %}<tr><td colspan="9" class="empty">No late students recorded for this date range.</td></tr>{% endfor %}
   </tbody>
 </table>
+{% if total_pages > 1 %}
+<div class="pagination">
+  {% if page > 1 %}<a class="button" href="{{ url_for('report', from_date=from_date, to_date=to_date, per_page=per_page, page=page-1) }}">Previous</a>{% endif %}
+  <span>Page {{ page }} / {{ total_pages }}</span>
+  {% if page < total_pages %}<a class="button" href="{{ url_for('report', from_date=from_date, to_date=to_date, per_page=per_page, page=page+1) }}">Next</a>{% endif %}
+</div>
+{% endif %}
 {% endblock %}

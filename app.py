@@ -26,6 +26,18 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 try:
+    from pptx import Presentation
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.util import Inches, Pt
+except Exception:
+    Presentation = None
+    CategoryChartData = None
+    XL_CHART_TYPE = None
+    Inches = None
+    Pt = None
+
+try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
@@ -492,16 +504,25 @@ def unmark_late(student_id):
 @login_required
 @admin_required
 def admin_home():
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = request.args.get("per_page", 50, type=int)
+    if per_page not in (30, 50, 100):
+        per_page = 50
+    offset = (page - 1) * per_page
     with get_conn() as conn:
         grades = conn.execute("SELECT * FROM grades ORDER BY sort_order, name").fetchall()
         sections = conn.execute("SELECT s.*, g.name AS grade_name FROM sections s JOIN grades g ON g.id=s.grade_id ORDER BY g.sort_order, s.name").fetchall()
+        total_students_row = conn.execute("SELECT COUNT(*) AS c FROM students").fetchone()
+        total_students = total_students_row["c"] or 0
         students = conn.execute("""
             SELECT st.*, g.name AS grade_name, s.name AS section_name
             FROM students st JOIN grades g ON g.id=st.grade_id JOIN sections s ON s.id=st.section_id
             ORDER BY st.active DESC, g.sort_order, s.name, st.name
-        """).fetchall()
+            LIMIT ? OFFSET ?
+        """, (per_page, offset)).fetchall()
         users = conn.execute("SELECT id, username, full_name, role, active, created_at FROM users ORDER BY role, username").fetchall()
-    return render_template("admin.html", grades=grades, sections=sections, students=students, users=users)
+    total_pages = max((total_students + per_page - 1) // per_page, 1)
+    return render_template("admin.html", grades=grades, sections=sections, students=students, users=users, page=page, per_page=per_page, total_pages=total_pages, total_students=total_students)
 
 
 @app.post("/admin/grades")
@@ -638,8 +659,18 @@ def report():
     to_date = parse_date_or_today(request.args.get("to_date") or from_date)
     if from_date > to_date:
         from_date, to_date = to_date, from_date
-    records = get_records_range(from_date, to_date)
-    return render_template("report.html", records=records, from_date=from_date, to_date=to_date, today=today_iso)
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = request.args.get("per_page", 50, type=int)
+    if per_page not in (30, 50, 100):
+        per_page = 50
+    records_all = get_records_range(from_date, to_date)
+    total_records = len(records_all)
+    total_pages = max((total_records + per_page - 1) // per_page, 1)
+    if page > total_pages:
+        page = total_pages
+    start = (page - 1) * per_page
+    records = records_all[start:start + per_page]
+    return render_template("report.html", records=records, from_date=from_date, to_date=to_date, today=today_iso, page=page, per_page=per_page, total_pages=total_pages, total_records=total_records, start_index=start)
 
 
 def get_records_range(from_date, to_date, grade_id=None):
@@ -1099,9 +1130,19 @@ def ai_report():
     to_date = parse_date_or_today(request.args.get('to_date') or from_date)
     if from_date > to_date:
         from_date, to_date = to_date, from_date
-    report = get_ai_risk_report(from_date, to_date)
-    summary = ai_summary_text(report, from_date, to_date)
-    return render_template('ai_report.html', report=report, summary=summary, from_date=from_date, to_date=to_date, today=today_iso)
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = request.args.get("per_page", 50, type=int)
+    if per_page not in (30, 50, 100):
+        per_page = 50
+    report_all = get_ai_risk_report(from_date, to_date)
+    total_records = len(report_all)
+    total_pages = max((total_records + per_page - 1) // per_page, 1)
+    if page > total_pages:
+        page = total_pages
+    start = (page - 1) * per_page
+    report = report_all[start:start + per_page]
+    summary = ai_summary_text(report_all, from_date, to_date)
+    return render_template('ai_report.html', report=report, summary=summary, from_date=from_date, to_date=to_date, today=today_iso, page=page, per_page=per_page, total_pages=total_pages, total_records=total_records, start_index=start)
 
 
 def is_arabic(text):
@@ -1684,6 +1725,246 @@ def send_daily_email():
             errors.append(f"{rec['email']}: {message}")
             print(f"Failed daily report to {rec['email']}: {message}")
     print(f"Daily email complete. Sent: {sent}. Errors: {len(errors)}")
+
+
+
+# =========================
+# ADMIN ANALYTICS DASHBOARD + PPT EXPORT
+# =========================
+
+def iso_to_date(value):
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def safe_text(value, limit=180):
+    text = str(value or "-")
+    return text if len(text) <= limit else text[:limit-3] + "..."
+
+
+def group_period_label(day_text, from_date, to_date):
+    """Return weekly labels for short/medium intervals and monthly labels for long intervals."""
+    d = iso_to_date(day_text)
+    start = iso_to_date(from_date)
+    end = iso_to_date(to_date)
+    if (end - start).days > 62:
+        return d.strftime("%Y-%m")
+    week_index = ((d - start).days // 7) + 1
+    chunk_start = start + timedelta(days=(week_index - 1) * 7)
+    chunk_end = min(chunk_start + timedelta(days=6), end)
+    return f"Week {week_index}: {chunk_start.isoformat()} to {chunk_end.isoformat()}"
+
+
+def empty_chart_payload(title):
+    return {"title": title, "labels": ["No Data"], "values": [0], "unique_students": [0], "details": []}
+
+
+def get_admin_analytics(from_date, to_date):
+    records = get_records_range(from_date, to_date)
+    if not records:
+        return {
+            "from_date": from_date,
+            "to_date": to_date,
+            "total_records": 0,
+            "unique_students": 0,
+            "trend": empty_chart_payload("Weekly / Monthly Late Students Trend"),
+            "sections": empty_chart_payload("Most Late/Absent Sections"),
+            "grades": empty_chart_payload("Most Late/Absent Grades"),
+        }
+
+    # 1) Weekly/monthly trend: chart shows counts only, no student names.
+    trend = {}
+    trend_students = {}
+    trend_details = {}
+    for r in records:
+        label = group_period_label(r["late_date"], from_date, to_date)
+        trend[label] = trend.get(label, 0) + 1
+        trend_students.setdefault(label, set()).add(r["student_id"])
+        trend_details.setdefault(label, []).append(r)
+
+    # 2) Sections: section means exact division like 10 ADV 1 / 12 GEN 2.
+    sections = {}
+    section_students = {}
+    section_details = {}
+    for r in records:
+        label = f"{r['grade_name']} - {r['section_name']}"
+        sections[label] = sections.get(label, 0) + 1
+        section_students.setdefault(label, set()).add(r["student_id"])
+        section_details.setdefault(label, []).append(r)
+
+    # 3) Grades: grade-level comparison.
+    grades = {}
+    grade_students = {}
+    grade_details = {}
+    for r in records:
+        label = r["grade_name"]
+        grades[label] = grades.get(label, 0) + 1
+        grade_students.setdefault(label, set()).add(r["student_id"])
+        grade_details.setdefault(label, []).append(r)
+
+    def build_payload(title, counts, students_map, details_map, sort_desc=False, limit=None):
+        items = list(counts.items())
+        if sort_desc:
+            items.sort(key=lambda x: (-x[1], x[0]))
+        else:
+            # Trend labels are already created in date order from records; keep insertion order.
+            pass
+        if limit:
+            items = items[:limit]
+        labels = [k for k, _ in items] or ["No Data"]
+        values = [v for _, v in items] or [0]
+        uniques = [len(students_map.get(k, set())) for k, _ in items] or [0]
+        details = []
+        for label, _ in items:
+            for r in details_map.get(label, []):
+                details.append({
+                    "group": label,
+                    "student_number": r.get("student_number") or "-",
+                    "student_name": r.get("student_name_en") or r.get("student_name") or "-",
+                    "student_name_ar": r.get("student_name_ar") or "-",
+                    "grade": r.get("grade_name") or "-",
+                    "section": r.get("section_name") or "-",
+                    "date": r.get("late_date") or "-",
+                    "day": r.get("day_name") or "-",
+                    "time": r.get("late_time") or "-",
+                    "recorded_by": r.get("recorder_name") or "Unknown",
+                })
+        return {"title": title, "labels": labels, "values": values, "unique_students": uniques, "details": details}
+
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "total_records": len(records),
+        "unique_students": len({r["student_id"] for r in records}),
+        "trend": build_payload("Weekly / Monthly Late Students Trend", trend, trend_students, trend_details),
+        "sections": build_payload("Most Late/Absent Sections", sections, section_students, section_details, sort_desc=True, limit=15),
+        "grades": build_payload("Most Late/Absent Grades", grades, grade_students, grade_details, sort_desc=True),
+    }
+
+
+@app.route('/admin/analytics')
+@login_required
+@admin_required
+def admin_analytics():
+    today_iso = date.today().isoformat()
+    default_from = date.today().replace(day=1).isoformat()
+    from_date = parse_date_or_today(request.args.get('from_date') or default_from)
+    to_date = parse_date_or_today(request.args.get('to_date') or today_iso)
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+    analytics = get_admin_analytics(from_date, to_date)
+    return render_template('admin_analytics.html', analytics=analytics, from_date=from_date, to_date=to_date, today=today_iso)
+
+
+def add_title(slide, title, subtitle=None):
+    slide.shapes.title.text = safe_text(title, 100)
+    if subtitle and len(slide.placeholders) > 1:
+        slide.placeholders[1].text = safe_text(subtitle, 160)
+
+
+def add_ppt_chart_slide(prs, payload, from_date, to_date):
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    title_box = slide.shapes.add_textbox(Inches(0.4), Inches(0.2), Inches(12.5), Inches(0.5))
+    title_frame = title_box.text_frame
+    title_frame.text = f"{payload['title']} ({from_date} to {to_date})"
+    title_frame.paragraphs[0].font.bold = True
+    title_frame.paragraphs[0].font.size = Pt(22)
+
+    chart_data = CategoryChartData()
+    chart_data.categories = [safe_text(x, 40) for x in payload['labels']]
+    chart_data.add_series('Late/Absent Records', payload['values'])
+    chart_data.add_series('Unique Students', payload['unique_students'])
+    chart = slide.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED,
+        Inches(0.55), Inches(0.95), Inches(12.1), Inches(3.6),
+        chart_data
+    ).chart
+    chart.has_legend = True
+    chart.chart_title.has_text_frame = True
+    chart.chart_title.text_frame.text = payload['title']
+
+    # Short detail table under chart. Full detail slides are added separately.
+    rows = min(len(payload['details']), 8) + 1
+    table_shape = slide.shapes.add_table(rows, 6, Inches(0.55), Inches(4.78), Inches(12.1), Inches(1.65))
+    table = table_shape.table
+    headers = ["Group", "Student No.", "Student", "Grade", "Section", "Date"]
+    for i, h in enumerate(headers):
+        table.cell(0, i).text = h
+    for row_idx, item in enumerate(payload['details'][:8], start=1):
+        values = [item['group'], item['student_number'], item['student_name'], item['grade'], item['section'], item['date']]
+        for col_idx, value in enumerate(values):
+            table.cell(row_idx, col_idx).text = safe_text(value, 40)
+
+
+def add_detail_slides(prs, payload, from_date, to_date):
+    details = payload.get('details') or []
+    if not details:
+        return
+    headers = ["Group", "Student No.", "English Name", "Arabic Name", "Grade", "Section", "Date", "Day", "Time", "Recorded By"]
+    chunk_size = 12
+    for idx in range(0, len(details), chunk_size):
+        chunk = details[idx:idx + chunk_size]
+        slide = prs.slides.add_slide(prs.slide_layouts[5])
+        title_box = slide.shapes.add_textbox(Inches(0.35), Inches(0.2), Inches(12.7), Inches(0.45))
+        title_box.text_frame.text = f"Details - {payload['title']} ({from_date} to {to_date})"
+        title_box.text_frame.paragraphs[0].font.bold = True
+        title_box.text_frame.paragraphs[0].font.size = Pt(18)
+        table_shape = slide.shapes.add_table(len(chunk) + 1, len(headers), Inches(0.25), Inches(0.85), Inches(12.85), Inches(6.25))
+        table = table_shape.table
+        for c, h in enumerate(headers):
+            table.cell(0, c).text = h
+        for r_idx, item in enumerate(chunk, start=1):
+            values = [item['group'], item['student_number'], item['student_name'], item['student_name_ar'], item['grade'], item['section'], item['date'], item['day'], item['time'], item['recorded_by']]
+            for c_idx, value in enumerate(values):
+                table.cell(r_idx, c_idx).text = safe_text(value, 28)
+
+
+def build_analytics_pptx(analytics, chart_key):
+    if Presentation is None:
+        raise RuntimeError("python-pptx is missing. Add python-pptx to requirements.txt.")
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+
+    title_slide = prs.slides.add_slide(prs.slide_layouts[0])
+    title_slide.shapes.title.text = "Attendance Analytics Dashboard"
+    title_slide.placeholders[1].text = f"Period: {analytics['from_date']} to {analytics['to_date']}\nTotal records: {analytics['total_records']} | Unique students: {analytics['unique_students']}"
+
+    chart_keys = [chart_key] if chart_key != "all" else ["trend", "sections", "grades"]
+    chart_names = {"trend": "Weekly / Monthly Trend", "sections": "Top Sections", "grades": "Top Grades"}
+    for key in chart_keys:
+        if key not in analytics:
+            continue
+        payload = analytics[key]
+        add_ppt_chart_slide(prs, payload, analytics['from_date'], analytics['to_date'])
+        add_detail_slides(prs, payload, analytics['from_date'], analytics['to_date'])
+
+    bio = BytesIO()
+    prs.save(bio)
+    bio.seek(0)
+    return bio
+
+
+@app.route('/admin/analytics/export/<chart_key>.pptx')
+@login_required
+@admin_required
+def export_analytics_pptx(chart_key):
+    today_iso = date.today().isoformat()
+    default_from = date.today().replace(day=1).isoformat()
+    from_date = parse_date_or_today(request.args.get('from_date') or default_from)
+    to_date = parse_date_or_today(request.args.get('to_date') or today_iso)
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+    if chart_key not in ("trend", "sections", "grades", "all"):
+        chart_key = "all"
+    analytics = get_admin_analytics(from_date, to_date)
+    pptx = build_analytics_pptx(analytics, chart_key)
+    suffix = from_date if from_date == to_date else f"{from_date}_to_{to_date}"
+    return send_file(
+        pptx,
+        as_attachment=True,
+        download_name=f"attendance_analytics_{chart_key}_{suffix}.pptx",
+        mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
 
 
 @app.route("/send-report-now")
