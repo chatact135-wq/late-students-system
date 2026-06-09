@@ -6,12 +6,95 @@
     <p class="muted">Manage grades, sections, students, users, and system settings.</p>
   </div>
 </div>
+
+{% if is_system_owner(me) %}
+<section class="panel wide owner-panel">
+  <div class="section-title-row">
+    <div>
+      <h2>System Owner Control Center</h2>
+      <p class="muted">Only the System Owner can edit usernames, reset passwords, promote users to Admin, downgrade Admins to User, delete users, and delete grades/sections.</p>
+    </div>
+    <span class="role-badge owner">Protected Owner Area</span>
+  </div>
+  <div class="notice-soft">
+    <strong>Password note:</strong> Current passwords cannot be displayed because they are securely encrypted. The System Owner can set a new password for any account using the Reset Password field.
+  </div>
+</section>
+{% endif %}
+
 <div class="admin-grid">
-  <section class="panel"><h2>Add Grade</h2><form method="post" action="{{ url_for('add_grade') }}" class="form-grid"><input name="name" placeholder="Grade 9" required><input name="sort_order" type="number" placeholder="Sort order"><button class="primary">Add Grade</button></form></section>
-  <section class="panel"><h2>Add Section</h2><form method="post" action="{{ url_for('add_section') }}" class="form-grid"><select name="grade_id">{% for g in grades %}<option value="{{g.id}}">{{g.name}}</option>{% endfor %}</select><input name="name" placeholder="10 ADV 1" required><button class="primary">Add Section</button></form></section>
-  <section class="panel"><h2>Add Student</h2><form method="post" action="{{ url_for('add_student') }}" class="form-grid"><select name="section_id">{% for s in sections %}<option value="{{s.id}}">{{s.grade_name}} - {{s.name}}</option>{% endfor %}</select><input name="name" placeholder="Student full name" required><button class="primary">Add Student</button></form></section>
-  <section class="panel"><h2>Add User</h2><form method="post" action="{{ url_for('add_user') }}" class="form-grid"><input name="full_name" placeholder="Full name" required><input name="username" placeholder="Username" required><input name="password" type="password" placeholder="Password" required><select name="role"><option value="user">User</option>{% if is_system_owner(me) %}<option value="admin">Admin</option>{% endif %}</select><button class="primary">Add User</button></form><p class="muted">Only the System Owner can create admin accounts. Only one System Owner is allowed.</p></section>
+  <section class="panel">
+    <h2>Add Grade</h2>
+    <form method="post" action="{{ url_for('add_grade') }}" class="form-grid">
+      <input name="name" placeholder="Grade 9" required>
+      <input name="sort_order" type="number" placeholder="Sort order">
+      <button class="primary">Add Grade</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Add Section</h2>
+    <form method="post" action="{{ url_for('add_section') }}" class="form-grid">
+      <select name="grade_id">{% for g in grades %}<option value="{{g.id}}">{{g.name}}</option>{% endfor %}</select>
+      <input name="name" placeholder="10 ADV 1" required>
+      <button class="primary">Add Section</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Add Student</h2>
+    <form method="post" action="{{ url_for('add_student') }}" class="form-grid">
+      <select name="section_id">{% for s in sections %}<option value="{{s.id}}">{{s.grade_name}} - {{s.name}}</option>{% endfor %}</select>
+      <input name="name" placeholder="Student full name" required>
+      <button class="primary">Add Student</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Add User</h2>
+    <form method="post" action="{{ url_for('add_user') }}" class="form-grid">
+      <input name="full_name" placeholder="Full name" required>
+      <input name="username" placeholder="Username" required>
+      <input name="password" type="password" placeholder="Password" required>
+      <select name="role">
+        <option value="user">User</option>
+        {% if is_system_owner(me) %}<option value="admin">Admin</option>{% endif %}
+      </select>
+      <button class="primary">Add User</button>
+    </form>
+    <p class="muted">System Owner can create Admins. Admins can create normal Users only.</p>
+  </section>
 </div>
+
+{% if is_system_owner(me) %}
+<section class="panel wide management-card">
+  <div class="section-title-row"><h2>Grades</h2><p class="muted">Delete is permanent and removes related sections, students, late records, and email recipients.</p></div>
+  <div class="compact-list">
+    {% for g in grades %}
+      <div class="compact-item">
+        <div><strong>{{ g.name }}</strong><span class="muted"> · Sort {{ g.sort_order }}</span></div>
+        <form method="post" action="{{ url_for('owner_delete_grade', grade_id=g.id) }}" onsubmit="return confirm('Delete {{ g.name }} and all related sections/students/late records?');">
+          <button class="danger small">Delete Grade</button>
+        </form>
+      </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel wide management-card">
+  <div class="section-title-row"><h2>Sections</h2><p class="muted">Delete is permanent and removes students and late records in that section.</p></div>
+  <div class="compact-list two-col">
+    {% for s in sections %}
+      <div class="compact-item">
+        <div><strong>{{ s.grade_name }} - {{ s.name }}</strong></div>
+        <form method="post" action="{{ url_for('owner_delete_section', section_id=s.id) }}" onsubmit="return confirm('Delete {{ s.grade_name }} - {{ s.name }} and all students/records inside it?');">
+          <button class="danger small">Delete Section</button>
+        </form>
+      </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
 
 {% if is_system_owner(me) %}
 <section class="panel wide owner-panel">
@@ -27,39 +110,74 @@
 {% endif %}
 
 <section class="panel wide">
-  <h2>{% if is_system_owner(me) %}System Owner Login Management{% else %}Users{% endif %}</h2>
+  <h2>{% if is_system_owner(me) %}User / Admin Login Management{% else %}Users{% endif %}</h2>
   {% if is_system_owner(me) %}
-    <p class="muted">System Owner can view and edit usernames, display names, roles, and reset passwords for all accounts. Current passwords are encrypted and cannot be displayed.</p>
+    <p class="muted">Edit display name and username, reset passwords, promote User → Admin, downgrade Admin → User, activate/deactivate, or delete accounts. The System Owner account is protected.</p>
   {% else %}
-    <p class="muted">Admins can view the user list only. User deletion, deactivation, and login editing are limited to the System Owner.</p>
+    <p class="muted">Admins can view users only. Login editing, role changes, deletion, and deactivation are limited to the System Owner.</p>
   {% endif %}
-  <table class="table user-admin-table">
-    <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Login Action</th><th>Access</th></tr></thead>
-    <tbody>
-    {% for u in users %}
-      <tr>
-        {% if is_system_owner(me) %}
-          <form method="post" action="{{ url_for('owner_update_user', user_id=u.id) }}" class="no-overlay">
-            <td><input name="full_name" value="{{u.full_name}}" required></td>
-            <td><input name="username" value="{{u.username}}" required></td>
-            <td>
-              {% if u.role == 'system_owner' %}
-                <input type="hidden" name="role" value="system_owner"><span class="role-badge owner">System Owner</span>
-              {% else %}
-                <select name="role"><option value="user" {% if u.role=='user' %}selected{% endif %}>User</option><option value="admin" {% if u.role=='admin' %}selected{% endif %}>Admin</option></select>
-              {% endif %}
-            </td>
-            <td>{{ 'Active' if u.active else 'Inactive' }}</td>
-            <td><input name="new_password" type="password" placeholder="New password optional"><button class="primary small">Save Login</button></td>
+
+  {% if is_system_owner(me) %}
+    <div class="owner-user-grid">
+      {% for u in users %}
+        <div class="user-card {% if u.role == 'system_owner' %}owner-account{% endif %}">
+          <form method="post" action="{{ url_for('owner_update_user', user_id=u.id) }}" class="no-overlay user-edit-form">
+            <input type="hidden" name="next" value="{{ url_for('admin_home') }}">
+            <div class="user-card-head">
+              <div>
+                <strong>{{ u.full_name }}</strong>
+                <div class="muted">@{{ u.username }}</div>
+              </div>
+              <span class="role-badge {% if u.role == 'system_owner' %}owner{% elif u.role == 'admin' %}admin{% else %}user{% endif %}">{{ u.role|replace('_',' ')|title }}</span>
+            </div>
+            <label>Full Name</label>
+            <input name="full_name" value="{{ u.full_name }}" required>
+            <label>Username</label>
+            <input name="username" value="{{ u.username }}" required>
+            <label>Role</label>
+            {% if u.role == 'system_owner' %}
+              <input type="hidden" name="role" value="system_owner">
+              <input value="System Owner - protected" disabled>
+            {% else %}
+              <select name="role">
+                <option value="user" {% if u.role=='user' %}selected{% endif %}>User</option>
+                <option value="admin" {% if u.role=='admin' %}selected{% endif %}>Admin</option>
+              </select>
+            {% endif %}
+            <label>Reset Password</label>
+            <input name="new_password" type="password" placeholder="Enter new password only if changing">
+            <div class="user-actions">
+              <button class="primary small">Save Login / Role</button>
+            </div>
           </form>
-          <td>{% if u.role != 'system_owner' %}<form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}" class="inline-form"><button class="danger small">{{ 'Deactivate' if u.active else 'Activate' }}</button></form>{% else %}<span class="muted">Protected</span>{% endif %}</td>
-        {% else %}
-          <td>{{u.full_name}}</td><td>{{u.username}}</td><td>{{u.role|replace('_',' ')|title}}</td><td>{{ 'Active' if u.active else 'Inactive' }}</td><td><span class="muted">System Owner only</span></td><td><span class="muted">View only</span></td>
-        {% endif %}
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
+          <div class="user-secondary-actions">
+            <span class="status-pill {{ 'active' if u.active else 'inactive' }}">{{ 'Active' if u.active else 'Inactive' }}</span>
+            {% if u.role != 'system_owner' %}
+              <form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}" class="inline-form"><button class="warning small">{{ 'Deactivate' if u.active else 'Activate' }}</button></form>
+              <form method="post" action="{{ url_for('owner_delete_user', user_id=u.id) }}" class="inline-form" onsubmit="return confirm('Delete this user permanently?');"><button class="danger small">Delete</button></form>
+            {% else %}
+              <span class="muted">Protected</span>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <table class="table user-admin-table">
+      <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Access</th></tr></thead>
+      <tbody>{% for u in users %}<tr><td>{{u.full_name}}</td><td>{{u.username}}</td><td>{{u.role|replace('_',' ')|title}}</td><td>{{ 'Active' if u.active else 'Inactive' }}</td><td><span class="muted">System Owner only</span></td></tr>{% endfor %}</tbody>
+    </table>
+  {% endif %}
 </section>
-<section class="panel wide"><h2>Students</h2><p class="muted">Students are automatically seeded from the official Excel roster and placed into the exact section, for example 10 ADV 1 or 12 GEN 2.</p><p class="muted">Showing {{ students|length }} of {{ total_students }} students · Page {{ page }} of {{ total_pages }}</p><table class="table"><thead><tr><th>Student No.</th><th>English Name</th><th>Arabic Name</th><th>Grade</th><th>Section</th><th>Original Excel Section</th><th>Status</th><th>Action</th></tr></thead><tbody>{% for s in students %}<tr><td>{{s.student_number or '-'}}</td><td>{{s.name}}</td><td>{{s.name_ar or '-'}}</td><td>{{s.grade_name}}</td><td>{{s.section_name}}</td><td>{{s.source_section or '-'}}</td><td>{{ 'Active' if s.active else 'Deleted' }}</td><td>{% if s.active %}<form method="post" action="{{ url_for('delete_student', student_id=s.id) }}"><button class="danger">Delete</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table>{% if total_pages > 1 %}<div class="pagination">{% if page > 1 %}<a class="button" href="{{ url_for('admin_home', page=page-1, per_page=per_page) }}">Previous</a>{% endif %}<span>Page {{ page }} / {{ total_pages }}</span>{% if page < total_pages %}<a class="button" href="{{ url_for('admin_home', page=page+1, per_page=per_page) }}">Next</a>{% endif %}</div>{% endif %}</section>
+
+<section class="panel wide">
+  <h2>Students</h2>
+  <p class="muted">Students are automatically seeded from the official Excel roster and placed into the exact section, for example 10 ADV 1 or 12 GEN 2.</p>
+  <p class="muted">Showing {{ students|length }} of {{ total_students }} students · Page {{ page }} of {{ total_pages }}</p>
+  <table class="table">
+    <thead><tr><th>Student No.</th><th>English Name</th><th>Arabic Name</th><th>Grade</th><th>Section</th><th>Original Excel Section</th><th>Status</th><th>Action</th></tr></thead>
+    <tbody>{% for s in students %}<tr><td>{{s.student_number or '-'}}</td><td>{{s.name}}</td><td>{{s.name_ar or '-'}}</td><td>{{s.grade_name}}</td><td>{{s.section_name}}</td><td>{{s.source_section or '-'}}</td><td>{{ 'Active' if s.active else 'Deleted' }}</td><td>{% if s.active %}<form method="post" action="{{ url_for('delete_student', student_id=s.id) }}"><button class="danger">Delete</button></form>{% endif %}</td></tr>{% endfor %}</tbody>
+  </table>
+  {% if total_pages > 1 %}<div class="pagination">{% if page > 1 %}<a class="button" href="{{ url_for('admin_home', page=page-1, per_page=per_page) }}">Previous</a>{% endif %}<span>Page {{ page }} / {{ total_pages }}</span>{% if page < total_pages %}<a class="button" href="{{ url_for('admin_home', page=page+1, per_page=per_page) }}">Next</a>{% endif %}</div>{% endif %}
+</section>
 {% endblock %}

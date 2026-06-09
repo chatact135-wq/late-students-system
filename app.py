@@ -761,36 +761,100 @@ def update_footer_settings():
 @login_required
 @system_owner_required
 def owner_update_user(user_id):
-    me = current_user()
     full_name = request.form.get("full_name", "").strip()
     username = request.form.get("username", "").strip()
-    role = request.form.get("role", "user").strip()
+    requested_role = request.form.get("role", "user").strip()
     new_password = request.form.get("new_password", "")
-    if role == "system_owner":
-        flash("Only one System Owner is allowed. Existing owner role cannot be assigned to another account.", "error")
-        return redirect(url_for("admin_home"))
+    next_url = request.form.get("next") or url_for("admin_home")
     if not full_name or not username:
         flash("Full name and username are required.", "error")
-        return redirect(url_for("admin_home"))
+        return redirect(next_url)
+    if requested_role not in ("user", "admin", "system_owner"):
+        flash("Invalid role selected.", "error")
+        return redirect(next_url)
     with get_conn() as conn:
         target = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         if not target:
             flash("User not found.", "error")
-            return redirect(url_for("admin_home"))
+            return redirect(next_url)
+        # Only the existing owner account may remain system_owner. No account can be promoted to owner.
         if target["role"] == "system_owner":
-            # The owner can update own name/username/password from this table, but cannot lose ownership here.
-            role = "system_owner"
+            final_role = "system_owner"
+        elif requested_role == "system_owner":
+            flash("Only one System Owner is allowed. You can promote users to Admin or downgrade them to User only.", "error")
+            return redirect(next_url)
+        else:
+            final_role = requested_role
         existing = conn.execute("SELECT id FROM users WHERE username=? AND id<>?", (username, user_id)).fetchone()
         if existing:
             flash("This username is already used by another account.", "error")
-            return redirect(url_for("admin_home"))
+            return redirect(next_url)
         if new_password:
-            conn.execute("UPDATE users SET full_name=?, username=?, role=?, password_hash=? WHERE id=?", (full_name, username, role, generate_password_hash(new_password), user_id))
+            conn.execute("UPDATE users SET full_name=?, username=?, role=?, password_hash=? WHERE id=?", (full_name, username, final_role, generate_password_hash(new_password), user_id))
         else:
-            conn.execute("UPDATE users SET full_name=?, username=?, role=? WHERE id=?", (full_name, username, role, user_id))
+            conn.execute("UPDATE users SET full_name=?, username=?, role=? WHERE id=?", (full_name, username, final_role, user_id))
         conn.commit()
-    flash("User login details updated by System Owner.", "success")
+    flash("Login details updated by System Owner.", "success")
+    return redirect(next_url)
+
+
+
+@app.post("/owner/users/<int:user_id>/delete")
+@login_required
+@system_owner_required
+def owner_delete_user(user_id):
+    if user_id == session.get("user_id"):
+        flash("You cannot delete your own System Owner account.", "error")
+        return redirect(url_for("admin_home"))
+    with get_conn() as conn:
+        target = conn.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+        if not target:
+            flash("User not found.", "error")
+            return redirect(url_for("admin_home"))
+        if target["role"] == "system_owner":
+            flash("The System Owner account is protected and cannot be deleted.", "error")
+            return redirect(url_for("admin_home"))
+        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        conn.commit()
+    flash("User deleted by System Owner.", "success")
     return redirect(url_for("admin_home"))
+
+
+@app.post("/owner/grades/<int:grade_id>/delete")
+@login_required
+@system_owner_required
+def owner_delete_grade(grade_id):
+    with get_conn() as conn:
+        grade = conn.execute("SELECT name FROM grades WHERE id=?", (grade_id,)).fetchone()
+        if not grade:
+            flash("Grade not found.", "error")
+            return redirect(url_for("admin_home"))
+        conn.execute("DELETE FROM late_records WHERE student_id IN (SELECT id FROM students WHERE grade_id=?)", (grade_id,))
+        conn.execute("DELETE FROM students WHERE grade_id=?", (grade_id,))
+        conn.execute("DELETE FROM sections WHERE grade_id=?", (grade_id,))
+        conn.execute("DELETE FROM email_recipients WHERE grade_id=?", (grade_id,))
+        conn.execute("DELETE FROM grades WHERE id=?", (grade_id,))
+        conn.commit()
+    flash(f"Grade deleted: {grade['name']}. Related sections, students, late records, and recipients were removed.", "success")
+    return redirect(url_for("admin_home"))
+
+
+@app.post("/owner/sections/<int:section_id>/delete")
+@login_required
+@system_owner_required
+def owner_delete_section(section_id):
+    with get_conn() as conn:
+        section = conn.execute("SELECT s.name, g.name AS grade_name FROM sections s JOIN grades g ON g.id=s.grade_id WHERE s.id=?", (section_id,)).fetchone()
+        if not section:
+            flash("Section not found.", "error")
+            return redirect(url_for("admin_home"))
+        conn.execute("DELETE FROM late_records WHERE student_id IN (SELECT id FROM students WHERE section_id=?)", (section_id,))
+        conn.execute("DELETE FROM students WHERE section_id=?", (section_id,))
+        conn.execute("DELETE FROM sections WHERE id=?", (section_id,))
+        conn.commit()
+    flash(f"Section deleted: {section['grade_name']} - {section['name']}. Related students and late records were removed.", "success")
+    return redirect(url_for("admin_home"))
+
 
 @app.post("/admin/email-recipients")
 @login_required
