@@ -1,39 +1,98 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="page-head">
+<div class="page-head chatbot-head">
   <div>
     <h1>AI Chatbot</h1>
-    <p class="muted">Ask in Arabic or English about students, grades, repeated lateness, risk level, summaries, dates, or general questions. If OPENAI_API_KEY is added in Render, the assistant works like a much smarter AI chatbot and uses the database context.</p>
+    <p class="muted">Use smart buttons for instant reports, or type your own Arabic/English question. Buttons are generated dynamically from the actual grades and sections in the system.</p>
   </div>
 </div>
 
-<div class="card chatbot-card">
-  <form method="post" class="chat-form">
-    <label>Ask the AI Assistant / اسأل المساعد الذكي</label>
-    <textarea name="question" rows="4" placeholder="Example: Who is late the most? / من أكثر الطلاب تأخيرًا؟">{{ question }}</textarea>
-    <button class="button" type="submit">Ask AI</button>
-  </form>
+<div class="chatbot-layout">
+  <div class="card chatbot-card smart-chat-card">
+    <form method="post" class="chat-form" id="manualChatForm">
+      <label>Ask the AI Assistant / اسأل المساعد الذكي</label>
+      <textarea name="question" rows="4" placeholder="Example: Who is late the most? / من أكثر الطلاب تأخيرًا؟">{{ question }}</textarea>
+      <button class="button" type="submit">Ask AI</button>
+    </form>
 
-  {% if answer %}
-  <div class="chat-answer">
-    <h2>AI Answer</h2>
-    <pre>{{ answer }}</pre>
+    {% if answer %}
+    <div class="chat-answer smart-answer">
+      <h2>AI Answer</h2>
+      <pre>{{ answer }}</pre>
+    </div>
+    {% else %}
+    <div class="chat-empty-state">
+      <div class="chat-empty-icon">🤖</div>
+      <h2>Choose a smart button or type a question</h2>
+      <p class="muted">The chatbot will generate direct reports from the database.</p>
+    </div>
+    {% endif %}
   </div>
-  {% endif %}
+
+  <div class="card quick-ai-panel">
+    <div class="quick-ai-title">
+      <div>
+        <h2>Smart Report Buttons</h2>
+        <p class="muted">Click once to generate the report directly.</p>
+      </div>
+      <input type="search" id="quickButtonSearch" placeholder="Search buttons..." aria-label="Search chatbot buttons">
+    </div>
+
+    <form method="post" id="quickButtonsForm">
+      <input type="hidden" name="quick_question" id="quickQuestionInput">
+
+      <div class="quick-section">
+        <h3>General Reports</h3>
+        <div class="quick-button-grid">
+          {% for item in quick_buttons.general %}
+          <button type="button" class="quick-ai-button" data-question="{{ item.question }}">{{ item.label }}</button>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="quick-section">
+        <h3>Grade Reports</h3>
+        <div class="quick-button-grid">
+          {% for item in quick_buttons.grades %}
+          <button type="button" class="quick-ai-button" data-question="{{ item.question }}">{{ item.label }}</button>
+          {% endfor %}
+        </div>
+      </div>
+
+      <details class="quick-section section-shortcuts" open>
+        <summary>Section Reports / تقارير الشعب</summary>
+        <div class="quick-button-grid section-button-grid">
+          {% for item in quick_buttons.sections %}
+          <button type="button" class="quick-ai-button section-ai-button" data-question="{{ item.question }}">{{ item.label }}</button>
+          {% endfor %}
+        </div>
+      </details>
+    </form>
+  </div>
 </div>
 
-<div class="card examples">
-  <h2>Example Questions</h2>
-  <div class="example-grid">
-    <span>Who is late the most?</span>
-    <span>Give me Grade 10 summary.</span>
-    <span>Who are the high-risk students?</span>
-    <span>ما خطورة الطالب Ahmed Al Mansoori؟</span>
-    <span>من أكثر الطلاب تأخيرًا؟</span>
-    <span>أعطني ملخص الصف العاشر.</span>
-    <span>What day is today?</span>
-    <span>ما هو اليوم؟</span>
-    <span>Explain why punctuality matters.</span>
-  </div>
-</div>
+<script>
+(function(){
+  const form = document.getElementById('quickButtonsForm');
+  const hidden = document.getElementById('quickQuestionInput');
+  const buttons = Array.from(document.querySelectorAll('.quick-ai-button'));
+  buttons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      hidden.value = btn.dataset.question;
+      btn.classList.add('clicked-loading');
+      form.submit();
+    });
+  });
+  const search = document.getElementById('quickButtonSearch');
+  if (search) {
+    search.addEventListener('input', () => {
+      const q = search.value.toLowerCase().trim();
+      buttons.forEach(btn => {
+        const hay = (btn.textContent + ' ' + btn.dataset.question).toLowerCase();
+        btn.style.display = hay.includes(q) ? '' : 'none';
+      });
+    });
+  }
+})();
+</script>
 {% endblock %}

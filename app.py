@@ -1543,6 +1543,11 @@ def detect_requested_range(question):
         end = today - timedelta(days=today.weekday()+1)
         start = end - timedelta(days=6)
         return start.isoformat(), end.isoformat()
+    if any(x in q for x in ['last month', 'previous month', 'الشهر الماضي']):
+        first_this = today.replace(day=1)
+        last_prev = first_this - timedelta(days=1)
+        start_prev = last_prev.replace(day=1)
+        return start_prev.isoformat(), last_prev.isoformat()
     if any(x in q for x in ['this month', 'الشهر', 'هذا الشهر']):
         start = today.replace(day=1)
         return start.isoformat(), today.isoformat()
@@ -1732,6 +1737,19 @@ def local_smart_answer(question, from_date, to_date):
     if mentioned:
         return format_student_answer(mentioned, arabic)
 
+    # Dynamic section-level smart reports, used by chatbot quick buttons and typed questions.
+    with get_conn() as _conn:
+        _sections = _conn.execute('''
+            SELECT s.name AS section_name, g.name AS grade_name
+            FROM sections s JOIN grades g ON g.id = s.grade_id
+        ''').fetchall()
+    for sec in _sections:
+        full_key = normalize_text(f"{sec['grade_name']} {sec['section_name']}")
+        sec_key = normalize_text(sec['section_name'])
+        if full_key in q_low or (sec_key in q_low and any(w in q_low for w in ['section', 'شعبة', 'الشعبة', 'summary', 'late', 'ملخص', 'تأخير'])):
+            sec_rows = [r for r in report if r['grade_name'] == sec['grade_name'] and r['section_name'] == sec['section_name']]
+            return format_filtered_report(sec_rows, from_date, to_date, f"{sec['grade_name']} - {sec['section_name']} report", arabic)
+
     if any(w in q_low for w in ['highest', 'most', 'top', 'late the most', 'أكثر', 'اعلى', 'أعلى']):
         top = [r for r in report if r['total_late_days'] > 0][:10]
         if not top:
@@ -1741,11 +1759,25 @@ def local_smart_answer(question, from_date, to_date):
         return 'Top late students in the selected period:\n' + '\n'.join([f"- {r['student_name']} | {r['grade_name']} {r['section_name']} | {r['total_late_days']} days | {r['risk']} risk" for r in top])
 
     if any(w in q_low for w in ['risk', 'danger', 'خطورة', 'ريسك', 'خطر', 'high risk', 'عالي الخطورة']):
-        high = [r for r in report if r['risk'] == 'High']
-        medium = [r for r in report if r['risk'] == 'Medium']
+        filtered_report = report
+        grade_label = ''
+        grade_map_for_risk = {
+            '9': ['grade 9', 'تاسع', 'التاسع', 'صف 9', 'الصف التاسع'],
+            '10': ['grade 10', 'عاشر', 'العاشر', 'صف 10', 'الصف العاشر'],
+            '11': ['grade 11', 'حادي عشر', 'الحادي عشر', 'صف 11'],
+            '12': ['grade 12', 'ثاني عشر', 'الثاني عشر', 'صف 12'],
+        }
+        for _num, _keys in grade_map_for_risk.items():
+            if any(k in q_low for k in _keys):
+                filtered_report = [r for r in report if str(grade_number_from_name(r['grade_name'])) == _num]
+                grade_label = f" Grade {_num}"
+                break
+        high = [r for r in filtered_report if r['risk'] == 'High']
+        medium = [r for r in filtered_report if r['risk'] == 'Medium']
         if arabic:
-            return f"تحليل الخطورة من {from_date} إلى {to_date}: مرتفع {len(high)} طالب، متوسط {len(medium)} طالب.\n" + ('الطلاب عالي الخطورة:\n' + '\n'.join([f"- {r['student_name']} ({r['total_late_days']} أيام)" for r in high[:15]]) if high else 'لا يوجد طلاب عالي الخطورة.')
-        return f"Risk analysis from {from_date} to {to_date}: High risk {len(high)} students, Medium risk {len(medium)} students.\n" + ('High-risk students:\n' + '\n'.join([f"- {r['student_name']} ({r['total_late_days']} days)" for r in high[:15]]) if high else 'No high-risk students found.')
+            return f"تحليل الخطورة{grade_label} من {from_date} إلى {to_date}: مرتفع {len(high)} طالب، متوسط {len(medium)} طالب.\n" + ('الطلاب عالي الخطورة:\n' + '\n'.join([f"- {r['student_name']} ({r['grade_name']} {r['section_name']} - {r['total_late_days']} أيام)" for r in high[:15]]) if high else 'لا يوجد طلاب عالي الخطورة.')
+        return f"Risk analysis{grade_label} from {from_date} to {to_date}: High risk {len(high)} students, Medium risk {len(medium)} students.\n" + ('High-risk students:\n' + '\n'.join([f"- {r['student_name']} ({r['grade_name']} {r['section_name']} - {r['total_late_days']} days)" for r in high[:15]]) if high else 'No high-risk students found.')
+
 
     if any(w in q_low for w in ['summary', 'report', 'ملخص', 'تقرير', 'overview']):
         base = ai_summary_text(report, from_date, to_date)
@@ -1770,11 +1802,7 @@ def local_smart_answer(question, from_date, to_date):
     for num, keys in grade_map.items():
         if any(k in q_low for k in keys):
             grade_rows = [r for r in report if str(grade_number_from_name(r['grade_name'])) == num]
-            total = sum(r['total_late_days'] for r in grade_rows)
-            high = sum(1 for r in grade_rows if r['risk'] == 'High')
-            if arabic:
-                return f"ملخص Grade {num} من {from_date} إلى {to_date}: مجموع سجلات التأخير {total}، وعدد الطلاب عالي الخطورة {high}."
-            return f"Grade {num} summary from {from_date} to {to_date}: {total} total late records, {high} high-risk students."
+            return format_filtered_report(grade_rows, from_date, to_date, f"Grade {num} report", arabic)
 
     if arabic:
         return ("أستطيع الإجابة عن الأسئلة العامة البسيطة وعن بيانات النظام. للحصول على شات بوت يجيب على أي سؤال عام مثل ChatGPT، "
@@ -1800,15 +1828,82 @@ def chatbot_answer(question):
     return local_smart_answer(q, from_date, to_date)
 
 
+
+def get_chatbot_quick_buttons():
+    """Build dynamic clickable prompts for all grades and sections."""
+    with get_conn() as conn:
+        grades = conn.execute("SELECT id, name FROM grades ORDER BY sort_order, name").fetchall()
+        sections = conn.execute('''
+            SELECT s.id, s.name AS section_name, g.name AS grade_name
+            FROM sections s
+            JOIN grades g ON g.id = s.grade_id
+            ORDER BY g.sort_order, g.name, s.name
+        ''').fetchall()
+    grade_buttons = []
+    for g in grades:
+        grade_name = g['name']
+        grade_buttons.extend([
+            {"label": f"{grade_name} summary", "question": f"Give me {grade_name} summary this month"},
+            {"label": f"{grade_name} late today", "question": f"Show {grade_name} late today"},
+            {"label": f"{grade_name} late last week", "question": f"Show {grade_name} late last week"},
+            {"label": f"{grade_name} late last month", "question": f"Show {grade_name} late last month"},
+            {"label": f"{grade_name} high risk", "question": f"Show high risk students in {grade_name} this month"},
+        ])
+    section_buttons = []
+    for sec in sections:
+        full = f"{sec['grade_name']} {sec['section_name']}"
+        section_buttons.extend([
+            {"label": f"{sec['section_name']} today", "question": f"Show {full} late today"},
+            {"label": f"{sec['section_name']} last month", "question": f"Show {full} late last month"},
+            {"label": f"{sec['section_name']} summary", "question": f"Give me {full} summary this month"},
+        ])
+    general_buttons = [
+        {"label": "Today late students", "question": "Show late students today"},
+        {"label": "Most late students", "question": "Who are the most late students this month?"},
+        {"label": "High risk students", "question": "Show high risk students this month"},
+        {"label": "Weekly summary", "question": "Give me a summary for this week"},
+        {"label": "Last month summary", "question": "Give me a summary for last month"},
+        {"label": "Who recorded lateness?", "question": "Who recorded the lateness this month?"},
+        {"label": "ما هو اليوم؟", "question": "ما هو اليوم؟"},
+        {"label": "ملخص اليوم", "question": "أعطني ملخص التأخير اليوم"},
+    ]
+    return {"general": general_buttons, "grades": grade_buttons, "sections": section_buttons}
+
+
+def format_filtered_report(rows, from_date, to_date, title, arabic=False):
+    rows = [r for r in rows if r['total_late_days'] > 0]
+    total = sum(r['total_late_days'] for r in rows)
+    high = sum(1 for r in rows if r['risk'] == 'High')
+    top = sorted(rows, key=lambda r: (-r['total_late_days'], r['student_name']))[:15]
+    if arabic:
+        if not top:
+            return f"{title}\nالفترة: {from_date} إلى {to_date}\nلا توجد سجلات تأخير في هذه الفترة."
+        return (f"{title}\nالفترة: {from_date} إلى {to_date}\n"
+                f"إجمالي سجلات التأخير: {total}\n"
+                f"عدد الطلاب المتأخرين: {len(rows)}\n"
+                f"طلاب عالي الخطورة: {high}\n\n"
+                "أكثر الطلاب تأخيرًا:\n" +
+                "\n".join([f"- {r['student_name']} | {r['grade_name']} {r['section_name']} | {r['total_late_days']} أيام | {r['risk']}" for r in top]))
+    if not top:
+        return f"{title}\nPeriod: {from_date} to {to_date}\nNo late records were found in this period."
+    return (f"{title}\nPeriod: {from_date} to {to_date}\n"
+            f"Total late records: {total}\n"
+            f"Late students: {len(rows)}\n"
+            f"High-risk students: {high}\n\n"
+            "Most late students:\n" +
+            "\n".join([f"- {r['student_name']} | {r['grade_name']} {r['section_name']} | {r['total_late_days']} days | {r['risk']}" for r in top]))
+
+
 @app.route('/chatbot', methods=['GET', 'POST'])
 @login_required
 def chatbot():
     answer = None
     question = ''
+    quick_buttons = get_chatbot_quick_buttons()
     if request.method == 'POST':
-        question = request.form.get('question', '')
+        question = request.form.get('quick_question') or request.form.get('question', '')
         answer = chatbot_answer(question)
-    return render_template('chatbot.html', question=question, answer=answer)
+    return render_template('chatbot.html', question=question, answer=answer, quick_buttons=quick_buttons)
 
 
 def get_smtp_settings():
