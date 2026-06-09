@@ -179,3 +179,12 @@ button:hover, .primary:hover, .danger:hover {
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 @media(max-width:1100px){.filter-row{grid-template-columns:repeat(2,1fr)}.analytics-layout{grid-template-columns:1fr}.readable-summary{grid-template-columns:1fr}.student-detail-card{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:640px){.filter-row{grid-template-columns:1fr}.compact-kpis{grid-template-columns:1fr}.student-detail-card{grid-template-columns:1fr}.chart-head{flex-direction:column}.chart-wrap{height:220px}}
+
+/* v20 login management */
+.account-panel{max-width:900px;margin:0 auto;}
+.login-edit-form label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#22324d;}
+.user-admin-table input,.user-admin-table select{min-width:130px;}
+.role-badge{display:inline-flex;align-items:center;padding:7px 10px;border-radius:999px;background:#eef2ff;color:#1e3a8a;font-weight:800;font-size:.82rem;}
+.role-badge.owner{background:linear-gradient(135deg,#fff7ed,#ffedd5);color:#9a3412;}
+button.small,.button.small{padding:7px 10px;font-size:.82rem;border-radius:10px;}
+.inline-form{display:inline-block;margin:0;}

@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>My Login Details</h1>
+    <p class="muted">Change your own username, display name, and password securely.</p>
+  </div>
+</div>
+<section class="panel account-panel">
+  <h2>Update My Account</h2>
+  <form method="post" class="form-grid login-edit-form">
+    <label>Full Name<input name="full_name" value="{{ me.full_name }}" required></label>
+    <label>Username<input name="username" value="{{ me.username }}" required></label>
+    <label>Current Password<input name="current_password" type="password" placeholder="Required to confirm changes" required></label>
+    <label>New Password<input name="new_password" type="password" placeholder="Leave blank to keep current password"></label>
+    <label>Confirm New Password<input name="confirm_password" type="password" placeholder="Repeat new password"></label>
+    <button class="primary">Save My Login Details</button>
+  </form>
+  <p class="muted">For security, the system never displays saved passwords. It stores encrypted password hashes only.</p>
+</section>
+{% endblock %}

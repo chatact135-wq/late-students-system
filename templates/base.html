@@ -20,6 +20,7 @@
         <a href="{{ url_for('admin_email') }}">Email Center</a>
         <a href="{{ url_for('admin_analytics') }}">Analytics</a>
       {% endif %}
+      <a href="{{ url_for('account_settings') }}">My Login</a>
       <span class="userpill">{{ me.full_name }} · {{ me.role|replace('_',' ')|title }}</span>
       <a class="logout" href="{{ url_for('logout') }}">Logout</a>
     </div>

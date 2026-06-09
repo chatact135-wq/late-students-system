@@ -26,6 +26,40 @@
 </section>
 {% endif %}
 
-<section class="panel wide"><h2>Users</h2><table class="table"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Action</th></tr></thead><tbody>{% for u in users %}<tr><td>{{u.full_name}}</td><td>{{u.username}}</td><td>{{u.role|replace('_',' ')|title}}</td><td>{{ 'Active' if u.active else 'Inactive' }}</td><td>{% if is_system_owner(me) and u.role != 'system_owner' %}<form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}"><button class="danger">{{ 'Deactivate' if u.active else 'Activate' }}</button></form>{% else %}<span class="muted">Protected</span>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
+<section class="panel wide">
+  <h2>{% if is_system_owner(me) %}System Owner Login Management{% else %}Users{% endif %}</h2>
+  {% if is_system_owner(me) %}
+    <p class="muted">System Owner can view and edit usernames, display names, roles, and reset passwords for all accounts. Current passwords are encrypted and cannot be displayed.</p>
+  {% else %}
+    <p class="muted">Admins can view the user list only. User deletion, deactivation, and login editing are limited to the System Owner.</p>
+  {% endif %}
+  <table class="table user-admin-table">
+    <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Login Action</th><th>Access</th></tr></thead>
+    <tbody>
+    {% for u in users %}
+      <tr>
+        {% if is_system_owner(me) %}
+          <form method="post" action="{{ url_for('owner_update_user', user_id=u.id) }}" class="no-overlay">
+            <td><input name="full_name" value="{{u.full_name}}" required></td>
+            <td><input name="username" value="{{u.username}}" required></td>
+            <td>
+              {% if u.role == 'system_owner' %}
+                <input type="hidden" name="role" value="system_owner"><span class="role-badge owner">System Owner</span>
+              {% else %}
+                <select name="role"><option value="user" {% if u.role=='user' %}selected{% endif %}>User</option><option value="admin" {% if u.role=='admin' %}selected{% endif %}>Admin</option></select>
+              {% endif %}
+            </td>
+            <td>{{ 'Active' if u.active else 'Inactive' }}</td>
+            <td><input name="new_password" type="password" placeholder="New password optional"><button class="primary small">Save Login</button></td>
+          </form>
+          <td>{% if u.role != 'system_owner' %}<form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}" class="inline-form"><button class="danger small">{{ 'Deactivate' if u.active else 'Activate' }}</button></form>{% else %}<span class="muted">Protected</span>{% endif %}</td>
+        {% else %}
+          <td>{{u.full_name}}</td><td>{{u.username}}</td><td>{{u.role|replace('_',' ')|title}}</td><td>{{ 'Active' if u.active else 'Inactive' }}</td><td><span class="muted">System Owner only</span></td><td><span class="muted">View only</span></td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
 <section class="panel wide"><h2>Students</h2><p class="muted">Students are automatically seeded from the official Excel roster and placed into the exact section, for example 10 ADV 1 or 12 GEN 2.</p><p class="muted">Showing {{ students|length }} of {{ total_students }} students · Page {{ page }} of {{ total_pages }}</p><table class="table"><thead><tr><th>Student No.</th><th>English Name</th><th>Arabic Name</th><th>Grade</th><th>Section</th><th>Original Excel Section</th><th>Status</th><th>Action</th></tr></thead><tbody>{% for s in students %}<tr><td>{{s.student_number or '-'}}</td><td>{{s.name}}</td><td>{{s.name_ar or '-'}}</td><td>{{s.grade_name}}</td><td>{{s.section_name}}</td><td>{{s.source_section or '-'}}</td><td>{{ 'Active' if s.active else 'Deleted' }}</td><td>{% if s.active %}<form method="post" action="{{ url_for('delete_student', student_id=s.id) }}"><button class="danger">Delete</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table>{% if total_pages > 1 %}<div class="pagination">{% if page > 1 %}<a class="button" href="{{ url_for('admin_home', page=page-1, per_page=per_page) }}">Previous</a>{% endif %}<span>Page {{ page }} / {{ total_pages }}</span>{% if page < total_pages %}<a class="button" href="{{ url_for('admin_home', page=page+1, per_page=per_page) }}">Next</a>{% endif %}</div>{% endif %}</section>
 {% endblock %}

@@ -477,6 +477,45 @@ def logout():
     return redirect(url_for("login"))
 
 
+
+
+@app.route("/account", methods=["GET", "POST"])
+@login_required
+def account_settings():
+    me = current_user()
+    if request.method == "POST":
+        full_name = request.form.get("full_name", "").strip()
+        username = request.form.get("username", "").strip()
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        if not full_name or not username:
+            flash("Full name and username are required.", "error")
+            return redirect(url_for("account_settings"))
+        if not check_password_hash(me["password_hash"], current_password):
+            flash("Current password is incorrect.", "error")
+            return redirect(url_for("account_settings"))
+        if new_password and new_password != confirm_password:
+            flash("New password and confirmation do not match.", "error")
+            return redirect(url_for("account_settings"))
+        try:
+            with get_conn() as conn:
+                existing = conn.execute("SELECT id FROM users WHERE username=? AND id<>?", (username, me["id"])).fetchone()
+                if existing:
+                    flash("This username is already used by another account.", "error")
+                    return redirect(url_for("account_settings"))
+                if new_password:
+                    conn.execute("UPDATE users SET full_name=?, username=?, password_hash=? WHERE id=?", (full_name, username, generate_password_hash(new_password), me["id"]))
+                else:
+                    conn.execute("UPDATE users SET full_name=?, username=? WHERE id=?", (full_name, username, me["id"]))
+                conn.commit()
+            flash("Your login details were updated successfully.", "success")
+            return redirect(url_for("account_settings"))
+        except Exception as exc:
+            flash(f"Could not update account: {exc}", "error")
+            return redirect(url_for("account_settings"))
+    return render_template("account.html")
+
 @app.route("/")
 @login_required
 def dashboard():
@@ -715,6 +754,43 @@ def update_footer_settings():
     flash("Footer copyright details updated.", "success")
     return redirect(url_for("admin_home"))
 
+
+
+
+@app.post("/owner/users/<int:user_id>/update")
+@login_required
+@system_owner_required
+def owner_update_user(user_id):
+    me = current_user()
+    full_name = request.form.get("full_name", "").strip()
+    username = request.form.get("username", "").strip()
+    role = request.form.get("role", "user").strip()
+    new_password = request.form.get("new_password", "")
+    if role == "system_owner":
+        flash("Only one System Owner is allowed. Existing owner role cannot be assigned to another account.", "error")
+        return redirect(url_for("admin_home"))
+    if not full_name or not username:
+        flash("Full name and username are required.", "error")
+        return redirect(url_for("admin_home"))
+    with get_conn() as conn:
+        target = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not target:
+            flash("User not found.", "error")
+            return redirect(url_for("admin_home"))
+        if target["role"] == "system_owner":
+            # The owner can update own name/username/password from this table, but cannot lose ownership here.
+            role = "system_owner"
+        existing = conn.execute("SELECT id FROM users WHERE username=? AND id<>?", (username, user_id)).fetchone()
+        if existing:
+            flash("This username is already used by another account.", "error")
+            return redirect(url_for("admin_home"))
+        if new_password:
+            conn.execute("UPDATE users SET full_name=?, username=?, role=?, password_hash=? WHERE id=?", (full_name, username, role, generate_password_hash(new_password), user_id))
+        else:
+            conn.execute("UPDATE users SET full_name=?, username=?, role=? WHERE id=?", (full_name, username, role, user_id))
+        conn.commit()
+    flash("User login details updated by System Owner.", "success")
+    return redirect(url_for("admin_home"))
 
 @app.post("/admin/email-recipients")
 @login_required
