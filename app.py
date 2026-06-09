@@ -1569,7 +1569,7 @@ def get_system_statistics(from_date, to_date):
             FROM grades g
             LEFT JOIN students s ON s.grade_id = g.id AND s.active = 1
             LEFT JOIN late_records lr ON lr.student_id = s.id AND lr.late_date BETWEEN ? AND ?
-            GROUP BY g.id
+            GROUP BY g.id, g.name, g.sort_order
             ORDER BY g.sort_order, g.name
         ''', (from_date, to_date)).fetchall()
         section_rows = conn.execute('''
@@ -1579,7 +1579,7 @@ def get_system_statistics(from_date, to_date):
             JOIN grades g ON g.id = sec.grade_id
             LEFT JOIN students s ON s.section_id = sec.id AND s.active = 1
             LEFT JOIN late_records lr ON lr.student_id = s.id AND lr.late_date BETWEEN ? AND ?
-            GROUP BY sec.id
+            GROUP BY sec.id, sec.name, g.name, g.sort_order
             ORDER BY g.sort_order, sec.name
         ''', (from_date, to_date)).fetchall()
         day_rows = conn.execute('''
@@ -1594,7 +1594,7 @@ def get_system_statistics(from_date, to_date):
             FROM late_records lr
             LEFT JOIN users u ON u.id = lr.recorded_by
             WHERE lr.late_date BETWEEN ? AND ?
-            GROUP BY recorder_name
+            GROUP BY COALESCE(u.full_name, u.username, 'Unknown')
             ORDER BY total_records DESC
         ''', (from_date, to_date)).fetchall()
     return {
