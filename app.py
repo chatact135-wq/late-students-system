@@ -19,7 +19,7 @@ import calendar
 
 from roster_seed import OFFICIAL_ROSTER
 
-from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file, Response
+from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file, Response, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -139,6 +139,8 @@ def adapt_sql_for_postgres(sql):
         sql += " ON CONFLICT (student_id, late_date) DO UPDATE SET late_time=EXCLUDED.late_time, recorded_by=EXCLUDED.recorded_by, created_at=EXCLUDED.created_at"
     elif "INSERT INTO email_recipients" in compact and "ON CONFLICT" not in compact:
         sql += " ON CONFLICT (grade_id, email) DO UPDATE SET person_name=EXCLUDED.person_name, active=EXCLUDED.active, created_at=EXCLUDED.created_at"
+    elif "INSERT INTO system_settings" in compact and "ON CONFLICT" not in compact:
+        sql += " ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value"
     return sql
 
 
@@ -160,7 +162,7 @@ def init_db():
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             full_name TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('admin','user')),
+            role TEXT NOT NULL CHECK(role IN ('system_owner','admin','user')),
             active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         )
@@ -220,7 +222,16 @@ def init_db():
             FOREIGN KEY(grade_id) REFERENCES grades(id) ON DELETE CASCADE
         )
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """)
+        ensure_role_schema(conn)
         ensure_seed_data(conn)
+        ensure_single_system_owner(conn)
+        ensure_default_settings(conn)
         conn.commit()
 
 
@@ -318,12 +329,68 @@ def upsert_official_student(conn, row, now):
             ),
         )
 
+
+def ensure_role_schema(conn):
+    """Allow the new system_owner role on PostgreSQL databases created by older versions."""
+    if USE_POSTGRES:
+        try:
+            conn.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check")
+        except Exception:
+            pass
+
+
+def ensure_single_system_owner(conn):
+    """Promote the default admin account to the single System Owner and prevent duplicates."""
+    default_user = conn.execute("SELECT id FROM users WHERE username=?", (DEFAULT_ADMIN_USERNAME,)).fetchone()
+    if default_user:
+        try:
+            conn.execute("UPDATE users SET role='system_owner', active=1 WHERE id=?", (default_user["id"],))
+            conn.execute("UPDATE users SET role='admin' WHERE role='system_owner' AND id<>?", (default_user["id"],))
+        except Exception:
+            # Existing SQLite databases with an old CHECK constraint may not allow role migration.
+            # Fresh deployments and PostgreSQL deployments are handled correctly.
+            pass
+
+
+def ensure_default_settings(conn):
+    defaults = {
+        "footer_owner_name": "",
+        "footer_owner_section": "",
+        "footer_extra": "Smart Late Students System",
+    }
+    for key, value in defaults.items():
+        existing = conn.execute("SELECT key FROM system_settings WHERE key=?", (key,)).fetchone()
+        if not existing:
+            conn.execute("INSERT INTO system_settings(key, value) VALUES (?, ?)", (key, value))
+
+
+def get_setting(key, default=""):
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM system_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row and row["value"] is not None else default
+
+
+def get_footer_settings():
+    return {
+        "owner_name": get_setting("footer_owner_name", ""),
+        "owner_section": get_setting("footer_owner_section", ""),
+        "extra": get_setting("footer_extra", "Smart Late Students System"),
+    }
+
+
+def is_admin_like(user):
+    return bool(user and user["role"] in ("admin", "system_owner"))
+
+
+def is_system_owner(user):
+    return bool(user and user["role"] == "system_owner")
+
 def ensure_seed_data(conn):
     now = datetime.now().isoformat(timespec="seconds")
     if not conn.execute("SELECT id FROM users WHERE username=?", (DEFAULT_ADMIN_USERNAME,)).fetchone():
         conn.execute(
             "INSERT INTO users(username,password_hash,full_name,role,active,created_at) VALUES (?,?,?,?,?,?)",
-            (DEFAULT_ADMIN_USERNAME, generate_password_hash(DEFAULT_ADMIN_PASSWORD), "System Admin", "admin", 1, now),
+            (DEFAULT_ADMIN_USERNAME, generate_password_hash(DEFAULT_ADMIN_PASSWORD), "System Owner", "system_owner", 1, now),
         )
 
     # Official grade structure from the uploaded IDH Excel roster.
@@ -365,16 +432,27 @@ def admin_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         u = current_user()
-        if not u or u["role"] != "admin":
+        if not is_admin_like(u):
             flash("Admin access required.", "error")
             return redirect(url_for("dashboard"))
         return fn(*args, **kwargs)
     return wrapper
 
 
+def system_owner_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        u = current_user()
+        if not is_system_owner(u):
+            flash("System Owner access required.", "error")
+            return redirect(url_for("admin_home"))
+        return fn(*args, **kwargs)
+    return wrapper
+
+
 @app.context_processor
 def inject_user():
-    return {"app_title": APP_TITLE, "me": current_user()}
+    return {"app_title": APP_TITLE, "me": current_user(), "footer_settings": get_footer_settings(), "is_admin_like": is_admin_like, "is_system_owner": is_system_owner}
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -533,7 +611,7 @@ def admin_home():
         """, (per_page, offset)).fetchall()
         users = conn.execute("SELECT id, username, full_name, role, active, created_at FROM users ORDER BY role, username").fetchall()
     total_pages = max((total_students + per_page - 1) // per_page, 1)
-    return render_template("admin.html", grades=grades, sections=sections, students=students, users=users, page=page, per_page=per_page, total_pages=total_pages, total_students=total_students)
+    return render_template("admin.html", grades=grades, sections=sections, students=students, users=users, page=page, per_page=per_page, total_pages=total_pages, total_students=total_students, footer_settings=get_footer_settings())
 
 
 @app.post("/admin/grades")
@@ -587,10 +665,18 @@ def delete_student(student_id):
 @login_required
 @admin_required
 def add_user():
-    now = datetime.now().isoformat(timespec="seconds")
+    me = current_user()
+    requested_role = request.form.get("role", "user").strip()
+    if requested_role == "system_owner":
+        flash("Only one System Owner is allowed. This role cannot be created from the interface.", "error")
+        return redirect(url_for("admin_home"))
+    if me["role"] == "admin" and requested_role != "user":
+        flash("Admins can add normal users only. System Owner controls admin-level accounts.", "error")
+        return redirect(url_for("admin_home"))
+    now = now_uae().isoformat(timespec="seconds")
     with get_conn() as conn:
         conn.execute("INSERT INTO users(username,password_hash,full_name,role,active,created_at) VALUES (?,?,?,?,1,?)", (
-            request.form["username"].strip(), generate_password_hash(request.form["password"]), request.form["full_name"].strip(), request.form["role"], now
+            request.form["username"].strip(), generate_password_hash(request.form["password"]), request.form["full_name"].strip(), requested_role, now
         ))
         conn.commit()
     return redirect(url_for("admin_home"))
@@ -598,14 +684,35 @@ def add_user():
 
 @app.post("/admin/users/<int:user_id>/toggle")
 @login_required
-@admin_required
+@system_owner_required
 def toggle_user(user_id):
     if user_id == session.get("user_id"):
         flash("You cannot deactivate your own account.", "error")
         return redirect(url_for("admin_home"))
     with get_conn() as conn:
+        target = conn.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+        if target and target["role"] == "system_owner":
+            flash("The System Owner account cannot be deactivated.", "error")
+            return redirect(url_for("admin_home"))
         conn.execute("UPDATE users SET active = CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?", (user_id,))
         conn.commit()
+    return redirect(url_for("admin_home"))
+
+
+@app.post("/owner/footer")
+@login_required
+@system_owner_required
+def update_footer_settings():
+    values = {
+        "footer_owner_name": request.form.get("owner_name", "").strip(),
+        "footer_owner_section": request.form.get("owner_section", "").strip(),
+        "footer_extra": request.form.get("extra", "").strip(),
+    }
+    with get_conn() as conn:
+        for key, value in values.items():
+            conn.execute("INSERT OR REPLACE INTO system_settings(key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+    flash("Footer copyright details updated.", "success")
     return redirect(url_for("admin_home"))
 
 
@@ -688,10 +795,10 @@ def report():
 @login_required
 def student_late_details(student_id):
     today_iso = date.today().isoformat()
-    from_date = parse_date_or_today(request.args.get("from_date") or "1900-01-01")
-    to_date = parse_date_or_today(request.args.get("to_date") or today_iso)
-    if from_date > to_date:
-        from_date, to_date = to_date, from_date
+    filter_key = request.args.get("filter", "all_time")
+    from_arg = request.args.get("from_date")
+    to_arg = request.args.get("to_date")
+    from_date, to_date, label = resolve_student_detail_period(student_id, filter_key, from_arg, to_arg)
     with get_conn() as conn:
         student = conn.execute("""
             SELECT s.*, g.name AS grade_name, sec.name AS section_name
@@ -710,12 +817,88 @@ def student_late_details(student_id):
     if not student:
         flash("Student not found.", "danger")
         return redirect(url_for("report", from_date=from_date, to_date=to_date))
+    records = format_student_detail_records(rows)
+    return render_template("student_details.html", student=dict(student), records=records, from_date=from_date, to_date=to_date, period_label=label, total_days=len(records))
+
+
+@app.route("/student/<int:student_id>/late-details-data")
+@login_required
+def student_late_details_data(student_id):
+    filter_key = request.args.get("filter", "selected_period")
+    from_arg = request.args.get("from_date")
+    to_arg = request.args.get("to_date")
+    from_date, to_date, label = resolve_student_detail_period(student_id, filter_key, from_arg, to_arg)
+    with get_conn() as conn:
+        student = conn.execute("""
+            SELECT s.*, g.name AS grade_name, sec.name AS section_name
+            FROM students s
+            JOIN grades g ON g.id=s.grade_id
+            JOIN sections sec ON sec.id=s.section_id
+            WHERE s.id=?
+        """, (student_id,)).fetchone()
+        if not student:
+            return jsonify({"ok": False, "message": "Student not found."}), 404
+        rows = conn.execute("""
+            SELECT r.*, u.full_name AS recorder_name, u.username AS recorder_username
+            FROM late_records r
+            LEFT JOIN users u ON u.id=r.recorded_by
+            WHERE r.student_id=? AND r.late_date BETWEEN ? AND ?
+            ORDER BY r.late_date DESC, r.late_time DESC
+        """, (student_id, from_date, to_date)).fetchall()
+    return jsonify({
+        "ok": True,
+        "student": {
+            "id": student["id"],
+            "student_number": student["student_number"] or "-",
+            "name": student["name_en"] or student["name"] or "-",
+            "arabic_name": student["name_ar"] or "-",
+            "grade": student["grade_name"],
+            "section": student["section_name"],
+            "created_at": student["created_at"] or "-",
+        },
+        "period": {"from_date": from_date, "to_date": to_date, "label": label},
+        "total_days": len(rows),
+        "records": format_student_detail_records(rows),
+    })
+
+
+def format_student_detail_records(rows):
     records = []
     for r in rows:
         item = dict(r)
         item["day_name"] = datetime.strptime(item["late_date"], "%Y-%m-%d").strftime("%A")
+        item["recorded_by_name"] = item.get("recorder_name") or "Unknown"
+        item["recorded_by_username"] = item.get("recorder_username") or "-"
         records.append(item)
-    return render_template("student_details.html", student=dict(student), records=records, from_date=from_date, to_date=to_date, total_days=len(records))
+    return records
+
+
+def resolve_student_detail_period(student_id, filter_key="selected_period", from_arg=None, to_arg=None):
+    today_iso = date.today().isoformat()
+    filter_key = (filter_key or "selected_period").strip()
+    if filter_key == "last_week":
+        end = date.today()
+        start = end - timedelta(days=6)
+        return start.isoformat(), end.isoformat(), "Last 7 days"
+    if filter_key == "last_month":
+        first_this_month = date.today().replace(day=1)
+        last_prev_month = first_this_month - timedelta(days=1)
+        first_prev_month = last_prev_month.replace(day=1)
+        return first_prev_month.isoformat(), last_prev_month.isoformat(), "Last month"
+    if filter_key == "all_time":
+        with get_conn() as conn:
+            student = conn.execute("SELECT created_at FROM students WHERE id=?", (student_id,)).fetchone()
+            earliest = conn.execute("SELECT MIN(late_date) AS first_late FROM late_records WHERE student_id=?", (student_id,)).fetchone()
+        created = (student["created_at"] or today_iso)[:10] if student else today_iso
+        first_late = earliest["first_late"] if earliest and earliest["first_late"] else created
+        start = min(created, first_late)
+        return start, today_iso, "Whole period"
+    # selected_period is the report period; never defaults to 1900.
+    from_date = parse_date_or_today(from_arg or today_iso)
+    to_date = parse_date_or_today(to_arg or today_iso)
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+    return from_date, to_date, "Selected report period"
 
 
 def get_records_range(from_date, to_date, grade_id=None):

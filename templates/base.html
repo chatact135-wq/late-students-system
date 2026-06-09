@@ -15,8 +15,12 @@
       <a href="{{ url_for('report') }}">Daily Report</a>
       <a href="{{ url_for('ai_report') }}">AI Report</a>
       <a href="{{ url_for('chatbot') }}">AI Chatbot</a>
-      {% if me.role == 'admin' %}<a href="{{ url_for('admin_home') }}">Admin Panel</a><a href="{{ url_for('admin_email') }}">Email Center</a><a href="{{ url_for('admin_analytics') }}">Analytics</a>{% endif %}
-      <span class="userpill">{{ me.full_name }} · {{ me.role }}</span>
+      {% if is_admin_like(me) %}
+        <a href="{{ url_for('admin_home') }}">Admin Panel</a>
+        <a href="{{ url_for('admin_email') }}">Email Center</a>
+        <a href="{{ url_for('admin_analytics') }}">Analytics</a>
+      {% endif %}
+      <span class="userpill">{{ me.full_name }} · {{ me.role|replace('_',' ')|title }}</span>
       <a class="logout" href="{{ url_for('logout') }}">Logout</a>
     </div>
     {% endif %}
@@ -31,18 +35,24 @@
     {% endwith %}
     {% block content %}{% endblock %}
   </main>
+  <footer class="site-footer">
+    <div>{{ footer_settings.extra or 'Smart Late Students System' }}</div>
+    {% if footer_settings.owner_name or footer_settings.owner_section %}
+      <small>Prepared by {{ footer_settings.owner_name or 'System Owner' }}{% if footer_settings.owner_section %} · {{ footer_settings.owner_section }}{% endif %}</small>
+    {% endif %}
+  </footer>
   <div id="loadingOverlay" class="loading-overlay"><div class="spinner"></div><div>Loading... Please wait</div></div>
   <script>
     document.addEventListener('DOMContentLoaded', function(){
       const overlay = document.getElementById('loadingOverlay');
       document.querySelectorAll('form.loading-form, form').forEach(function(form){
         form.addEventListener('submit', function(){
-          if(overlay) overlay.classList.add('show');
+          if(!form.classList.contains('no-overlay') && overlay) overlay.classList.add('show');
         });
       });
       document.querySelectorAll('a').forEach(function(link){
         const href = link.getAttribute('href') || '';
-        if(href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.includes('/export/')){
+        if(href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.includes('/export/') && !link.classList.contains('no-overlay-link')){
           link.addEventListener('click', function(){ if(overlay) overlay.classList.add('show'); });
         }
       });

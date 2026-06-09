@@ -3,7 +3,7 @@
 <div class="page-head">
   <div>
     <h1>Student Late Details</h1>
-    <p class="muted">All late/absent days for the selected student. Times are displayed in UAE time.</p>
+    <p class="muted">All late/absent days for the selected student. Time Added is displayed in UAE local time.</p>
   </div>
   <a class="button" href="{{ url_for('report', from_date=from_date, to_date=to_date) }}">Back to Report</a>
 </div>
@@ -16,17 +16,17 @@
     <div><strong>Grade</strong><span>{{ student.grade_name }}</span></div>
     <div><strong>Section</strong><span>{{ student.section_name }}</span></div>
     <div><strong>Total Late Days</strong><span>{{ total_days }}</span></div>
-    <div><strong>Period</strong><span>{{ from_date }} → {{ to_date }}</span></div>
+    <div><strong>Period</strong><span>{{ period_label }} · {{ from_date }} → {{ to_date }}</span></div>
   </div>
 </section>
 
 <table class="table">
-  <thead><tr><th>#</th><th>Date</th><th>Day</th><th>Time Added UAE</th><th>Recorded By</th><th>Created At UAE</th></tr></thead>
+  <thead><tr><th>#</th><th>Date</th><th>Day</th><th>Time Added</th><th>Recorded By</th></tr></thead>
   <tbody>
   {% for r in records %}
-    <tr><td>{{ loop.index }}</td><td>{{ r.late_date }}</td><td>{{ r.day_name }}</td><td>{{ r.late_time }}</td><td>{{ r.recorder_name or 'Unknown' }} ({{ r.recorder_username or '-' }})</td><td>{{ r.created_at }}</td></tr>
+    <tr><td>{{ loop.index }}</td><td>{{ r.late_date }}</td><td>{{ r.day_name }}</td><td>{{ r.late_time }}</td><td>{{ r.recorded_by_name or 'Unknown' }} ({{ r.recorded_by_username or '-' }})</td></tr>
   {% else %}
-    <tr><td colspan="6" class="empty">No records found.</td></tr>
+    <tr><td colspan="5" class="empty">No records found.</td></tr>
   {% endfor %}
   </tbody>
 </table>

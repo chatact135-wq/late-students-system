@@ -1,13 +1,31 @@
 {% extends 'base.html' %}
 {% block content %}
-<h1>Admin Panel</h1>
-<p><a class="primary-link" href="{{ url_for('admin_email') }}">Open Email Center: recipients, daily Excel email, and manual sending</a> <a class="primary-link" href="{{ url_for('admin_analytics') }}">Open Admin Analytics Dashboard</a></p>
+<div class="page-head">
+  <div>
+    <h1>Admin Panel</h1>
+    <p class="muted">Manage grades, sections, students, users, and system settings.</p>
+  </div>
+</div>
 <div class="admin-grid">
   <section class="panel"><h2>Add Grade</h2><form method="post" action="{{ url_for('add_grade') }}" class="form-grid"><input name="name" placeholder="Grade 9" required><input name="sort_order" type="number" placeholder="Sort order"><button class="primary">Add Grade</button></form></section>
-  <section class="panel"><h2>Add Section</h2><form method="post" action="{{ url_for('add_section') }}" class="form-grid"><select name="grade_id">{% for g in grades %}<option value="{{g.id}}">{{g.name}}</option>{% endfor %}</select><input name="name" placeholder="9A" required><button class="primary">Add Section</button></form></section>
+  <section class="panel"><h2>Add Section</h2><form method="post" action="{{ url_for('add_section') }}" class="form-grid"><select name="grade_id">{% for g in grades %}<option value="{{g.id}}">{{g.name}}</option>{% endfor %}</select><input name="name" placeholder="10 ADV 1" required><button class="primary">Add Section</button></form></section>
   <section class="panel"><h2>Add Student</h2><form method="post" action="{{ url_for('add_student') }}" class="form-grid"><select name="section_id">{% for s in sections %}<option value="{{s.id}}">{{s.grade_name}} - {{s.name}}</option>{% endfor %}</select><input name="name" placeholder="Student full name" required><button class="primary">Add Student</button></form></section>
-  <section class="panel"><h2>Add User</h2><form method="post" action="{{ url_for('add_user') }}" class="form-grid"><input name="full_name" placeholder="Full name" required><input name="username" placeholder="Username" required><input name="password" type="password" placeholder="Password" required><select name="role"><option value="user">User</option><option value="admin">Admin</option></select><button class="primary">Add User</button></form></section>
+  <section class="panel"><h2>Add User</h2><form method="post" action="{{ url_for('add_user') }}" class="form-grid"><input name="full_name" placeholder="Full name" required><input name="username" placeholder="Username" required><input name="password" type="password" placeholder="Password" required><select name="role"><option value="user">User</option>{% if is_system_owner(me) %}<option value="admin">Admin</option>{% endif %}</select><button class="primary">Add User</button></form><p class="muted">Only the System Owner can create admin accounts. Only one System Owner is allowed.</p></section>
 </div>
-<section class="panel wide"><h2>Users</h2><table class="table"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Action</th></tr></thead><tbody>{% for u in users %}<tr><td>{{u.full_name}}</td><td>{{u.username}}</td><td>{{u.role}}</td><td>{{ 'Active' if u.active else 'Inactive' }}</td><td><form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}"><button class="danger">{{ 'Deactivate' if u.active else 'Activate' }}</button></form></td></tr>{% endfor %}</tbody></table></section>
+
+{% if is_system_owner(me) %}
+<section class="panel wide owner-panel">
+  <h2>System Owner Copyright / Footer Settings</h2>
+  <p class="muted">This section is visible only to the System Owner. The saved text appears at the bottom of every page.</p>
+  <form method="post" action="{{ url_for('update_footer_settings') }}" class="form-grid footer-form">
+    <input name="owner_name" placeholder="System owner name" value="{{ footer_settings.owner_name }}">
+    <input name="owner_section" placeholder="Section / department / school" value="{{ footer_settings.owner_section }}">
+    <input name="extra" placeholder="Footer copyright text" value="{{ footer_settings.extra }}">
+    <button class="primary">Save Footer Details</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="panel wide"><h2>Users</h2><table class="table"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Action</th></tr></thead><tbody>{% for u in users %}<tr><td>{{u.full_name}}</td><td>{{u.username}}</td><td>{{u.role|replace('_',' ')|title}}</td><td>{{ 'Active' if u.active else 'Inactive' }}</td><td>{% if is_system_owner(me) and u.role != 'system_owner' %}<form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}"><button class="danger">{{ 'Deactivate' if u.active else 'Activate' }}</button></form>{% else %}<span class="muted">Protected</span>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
 <section class="panel wide"><h2>Students</h2><p class="muted">Students are automatically seeded from the official Excel roster and placed into the exact section, for example 10 ADV 1 or 12 GEN 2.</p><p class="muted">Showing {{ students|length }} of {{ total_students }} students · Page {{ page }} of {{ total_pages }}</p><table class="table"><thead><tr><th>Student No.</th><th>English Name</th><th>Arabic Name</th><th>Grade</th><th>Section</th><th>Original Excel Section</th><th>Status</th><th>Action</th></tr></thead><tbody>{% for s in students %}<tr><td>{{s.student_number or '-'}}</td><td>{{s.name}}</td><td>{{s.name_ar or '-'}}</td><td>{{s.grade_name}}</td><td>{{s.section_name}}</td><td>{{s.source_section or '-'}}</td><td>{{ 'Active' if s.active else 'Deleted' }}</td><td>{% if s.active %}<form method="post" action="{{ url_for('delete_student', student_id=s.id) }}"><button class="danger">Delete</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table>{% if total_pages > 1 %}<div class="pagination">{% if page > 1 %}<a class="button" href="{{ url_for('admin_home', page=page-1, per_page=per_page) }}">Previous</a>{% endif %}<span>Page {{ page }} / {{ total_pages }}</span>{% if page < total_pages %}<a class="button" href="{{ url_for('admin_home', page=page+1, per_page=per_page) }}">Next</a>{% endif %}</div>{% endif %}</section>
 {% endblock %}

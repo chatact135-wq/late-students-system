@@ -3,7 +3,7 @@
 <div class="page-head">
   <div>
     <h1>Late Report</h1>
-    <p class="muted">Export a full interval using Start Date and End Date. Times are stored and displayed in UAE time.</p>
+    <p class="muted">Export a full interval using Start Date and End Date. Time Added is stored and displayed in UAE local time.</p>
   </div>
   <a class="button" href="{{ url_for('export_late_report_excel', from_date=from_date, to_date=to_date) }}">Download Interval Excel</a>
 </div>
@@ -21,7 +21,7 @@
 </form>
 <p class="muted">Showing {{ records|length }} of {{ total_records }} records · Page {{ page }} of {{ total_pages }}</p>
 <table class="table">
-  <thead><tr><th>#</th><th>Student</th><th>Grade</th><th>Section</th><th>Late/Absent Day</th><th>Date</th><th>Time Added UAE</th><th>Total Late Days</th><th>Recorded By</th><th>Details</th></tr></thead>
+  <thead><tr><th>#</th><th>Student</th><th>Grade</th><th>Section</th><th>Late/Absent Day</th><th>Date</th><th>Time Added</th><th>Total Late Days</th><th>Recorded By</th><th>Details</th></tr></thead>
   <tbody>
     {% for r in records %}
     <tr>
@@ -34,7 +34,11 @@
       <td>{{r.late_time}}</td>
       <td>{{r.total_days}}</td>
       <td>{{r.recorder_name or 'Unknown'}} ({{r.recorder_username or '-'}})</td>
-      <td>{% if r.total_days|int > 1 %}<a class="button small" href="{{ url_for('student_late_details', student_id=r.student_id, from_date='1900-01-01', to_date=to_date) }}">View Details</a>{% else %}<span class="muted">-</span>{% endif %}</td>
+      <td>
+        {% if r.total_days|int > 1 %}
+          <button class="button small details-btn" type="button" data-student-id="{{ r.student_id }}" data-from-date="{{ from_date }}" data-to-date="{{ to_date }}">View Details</button>
+        {% else %}<span class="muted">-</span>{% endif %}
+      </td>
     </tr>
     {% else %}<tr><td colspan="10" class="empty">No late students recorded for this date range.</td></tr>{% endfor %}
   </tbody>
@@ -46,4 +50,77 @@
   {% if page < total_pages %}<a class="button" href="{{ url_for('report', from_date=from_date, to_date=to_date, per_page=per_page, page=page+1) }}">Next</a>{% endif %}
 </div>
 {% endif %}
+
+<div id="studentModal" class="modal-backdrop" aria-hidden="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div>
+        <h2 id="modalTitle">Student Late Details</h2>
+        <p id="modalSub" class="muted">Loading...</p>
+      </div>
+      <button type="button" class="modal-close" id="modalClose">×</button>
+    </div>
+    <div class="modal-controls">
+      <label>Period
+        <select id="detailFilter">
+          <option value="selected_period">Selected report period</option>
+          <option value="last_week">Last 7 days</option>
+          <option value="last_month">Last month</option>
+          <option value="all_time">Whole period</option>
+        </select>
+      </label>
+    </div>
+    <div id="modalBody" class="modal-body"><div class="mini-loader">Loading details...</div></div>
+  </div>
+</div>
+
+<script>
+let activeStudentId = null;
+let activeFromDate = null;
+let activeToDate = null;
+const modal = document.getElementById('studentModal');
+const closeBtn = document.getElementById('modalClose');
+const filterSelect = document.getElementById('detailFilter');
+const title = document.getElementById('modalTitle');
+const sub = document.getElementById('modalSub');
+const body = document.getElementById('modalBody');
+
+function openDetails(btn){
+  activeStudentId = btn.dataset.studentId;
+  activeFromDate = btn.dataset.fromDate;
+  activeToDate = btn.dataset.toDate;
+  filterSelect.value = 'selected_period';
+  modal.classList.add('show');
+  modal.setAttribute('aria-hidden','false');
+  loadDetails();
+}
+async function loadDetails(){
+  if(!activeStudentId) return;
+  body.innerHTML = '<div class="mini-loader">Loading details...</div>';
+  const url = `/student/${activeStudentId}/late-details-data?filter=${encodeURIComponent(filterSelect.value)}&from_date=${encodeURIComponent(activeFromDate)}&to_date=${encodeURIComponent(activeToDate)}`;
+  try{
+    const res = await fetch(url);
+    const data = await res.json();
+    if(!data.ok){ body.innerHTML = `<div class="empty">${data.message || 'No details found.'}</div>`; return; }
+    title.textContent = data.student.name;
+    sub.textContent = `${data.student.grade} · ${data.student.section} · ${data.period.label} (${data.period.from_date} → ${data.period.to_date}) · Total: ${data.total_days}`;
+    const cards = `
+      <div class="details-grid compact-details">
+        <div><strong>Student No.</strong><span>${data.student.student_number}</span></div>
+        <div><strong>Arabic Name</strong><span>${data.student.arabic_name}</span></div>
+        <div><strong>Grade</strong><span>${data.student.grade}</span></div>
+        <div><strong>Section</strong><span>${data.student.section}</span></div>
+      </div>`;
+    const rows = data.records.map((r, i) => `<tr><td>${i+1}</td><td>${r.late_date}</td><td>${r.day_name}</td><td>${r.late_time}</td><td>${r.recorded_by_name} (${r.recorded_by_username})</td></tr>`).join('');
+    body.innerHTML = cards + `<table class="table compact"><thead><tr><th>#</th><th>Date</th><th>Day</th><th>Time Added</th><th>Recorded By</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No records found for this period.</td></tr>'}</tbody></table>`;
+  } catch(e){
+    body.innerHTML = '<div class="empty">Could not load details. Please try again.</div>';
+  }
+}
+document.querySelectorAll('.details-btn').forEach(btn => btn.addEventListener('click', () => openDetails(btn)));
+filterSelect.addEventListener('change', loadDetails);
+closeBtn.addEventListener('click', () => modal.classList.remove('show'));
+modal.addEventListener('click', e => { if(e.target === modal) modal.classList.remove('show'); });
+document.addEventListener('keydown', e => { if(e.key === 'Escape') modal.classList.remove('show'); });
+</script>
 {% endblock %}

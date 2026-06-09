@@ -1,9 +1,9 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="page-head">
+<div class="page-head analytics-hero">
   <div>
     <h1>Admin Analytics Dashboard</h1>
-    <p class="muted">Admin-only live charts by selected period. The charts show numbers only, while hover/details and PowerPoint exports include full student details.</p>
+    <p class="muted">Admin-only live charts by selected period. Use the view selector to switch between bar and pie charts with animated rendering.</p>
   </div>
   <a class="button" href="{{ url_for('export_analytics_pptx', chart_key='all', from_date=from_date, to_date=to_date) }}">Export All Charts PPT</a>
 </div>
@@ -11,17 +11,28 @@
 <form class="filters" method="get">
   <label>From Date<input type="date" name="from_date" value="{{ from_date }}"></label>
   <label>To Date<input type="date" name="to_date" value="{{ to_date }}"></label>
+  <label>Chart View
+    <select id="globalChartType">
+      <option value="bar">Animated Bar</option>
+      <option value="pie">Pie Chart</option>
+    </select>
+  </label>
   <button class="button" type="submit">Analyze Period</button>
 </form>
 
 <div class="analytics-kpis">
-  <div class="kpi-card"><span>Total Late/Absent Records</span><strong>{{ analytics.total_records }}</strong></div>
-  <div class="kpi-card"><span>Students With Records</span><strong>{{ analytics.unique_students }}</strong></div>
-  <div class="kpi-card"><span>Period</span><strong>{{ from_date }} → {{ to_date }}</strong></div>
+  <div class="kpi-card pulse"><span>Total Late/Absent Records</span><strong>{{ analytics.total_records }}</strong></div>
+  <div class="kpi-card pulse"><span>Students With Records</span><strong>{{ analytics.unique_students }}</strong></div>
+  <div class="kpi-card pulse"><span>Period</span><strong>{{ from_date }} → {{ to_date }}</strong></div>
+</div>
+
+<div class="insight-strip">
+  <div><strong>Smart Insight</strong><span>Hover over charts to reveal details. Student names are hidden on the chart labels, but visible in tooltips and the detail table.</span></div>
+  <div><strong>Focused View</strong><span>Sections mean exact groups such as 10 ADV 1, 10 GEN 2, 12 ADV 2.</span></div>
 </div>
 
 <div class="chart-grid">
-  <section class="panel chart-card">
+  <section class="panel chart-card animated-card">
     <div class="chart-head">
       <h2>1) Weekly / Monthly Comparison</h2>
       <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='trend', from_date=from_date, to_date=to_date) }}">Export This Chart PPT</a>
@@ -30,26 +41,26 @@
     <canvas id="trendChart" height="140"></canvas>
   </section>
 
-  <section class="panel chart-card">
+  <section class="panel chart-card animated-card">
     <div class="chart-head">
       <h2>2) Most Late/Absent Sections</h2>
       <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='sections', from_date=from_date, to_date=to_date) }}">Export This Chart PPT</a>
     </div>
-    <p class="muted">Sections mean exact groups such as 10 ADV 1, 10 GEN 2, 12 ADV 2.</p>
+    <p class="muted">Shows exactly which section has the highest number of late/absent records.</p>
     <canvas id="sectionsChart" height="140"></canvas>
   </section>
 
-  <section class="panel chart-card">
+  <section class="panel chart-card animated-card">
     <div class="chart-head">
       <h2>3) Most Late Students</h2>
       <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='students', from_date=from_date, to_date=to_date) }}">Export This Chart PPT</a>
     </div>
-    <p class="muted">Chart labels hide names; hover over each bar to see the student. Full details are listed below and in the PowerPoint export.</p>
+    <p class="muted">Chart labels hide names; hover over each item to see the student and section.</p>
     <canvas id="studentsChart" height="140"></canvas>
   </section>
 </div>
 
-<div class="panel wide">
+<div class="panel wide featured-panel">
   <h2>Most Late Students Details</h2>
   <table class="table compact">
     <thead><tr><th>Rank</th><th>Student No.</th><th>English Name</th><th>Arabic Name</th><th>Grade</th><th>Section</th><th>Total Late Days</th><th>Late Dates</th></tr></thead>
@@ -87,19 +98,24 @@
 const trend = {{ analytics.trend|tojson }};
 const sections = {{ analytics.sections|tojson }};
 const students = {{ analytics.students|tojson }};
+const chartStore = {};
 
-function makeBarChart(canvasId, payload, title) {
+function buildDataset(payload, type){
+  const base = { label: 'Late/Absent Records', data: payload.values, borderWidth: 1 };
+  if(type === 'pie' || type === 'doughnut'){
+    return [{...base, hoverOffset: 12}];
+  }
+  return [{...base, borderRadius: 10}];
+}
+function makeChart(canvasId, payload, title, type='bar') {
   const ctx = document.getElementById(canvasId);
-  new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: payload.labels,
-      datasets: [
-        { label: 'Late/Absent Records', data: payload.values, borderWidth: 1 }
-      ]
-    },
+  if(chartStore[canvasId]) chartStore[canvasId].destroy();
+  chartStore[canvasId] = new Chart(ctx, {
+    type: type,
+    data: { labels: payload.labels, datasets: buildDataset(payload, type) },
     options: {
       responsive: true,
+      animation: { duration: 950, easing: 'easeOutQuart' },
       plugins: {
         legend: { position: 'top' },
         title: { display: true, text: title },
@@ -112,12 +128,16 @@ function makeBarChart(canvasId, payload, title) {
           }
         }
       },
-      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+      scales: (type === 'pie' || type === 'doughnut') ? {} : { y: { beginAtZero: true, ticks: { precision: 0 } } }
     }
   });
 }
-makeBarChart('trendChart', trend, 'Weekly / Monthly Late Students Trend');
-makeBarChart('sectionsChart', sections, 'Most Late/Absent Sections');
-makeBarChart('studentsChart', students, 'Most Late Students');
+function renderAll(type){
+  makeChart('trendChart', trend, 'Weekly / Monthly Late Students Trend', type);
+  makeChart('sectionsChart', sections, 'Most Late/Absent Sections', type);
+  makeChart('studentsChart', students, 'Most Late Students', type);
+}
+renderAll('bar');
+document.getElementById('globalChartType').addEventListener('change', function(){ renderAll(this.value); });
 </script>
 {% endblock %}
