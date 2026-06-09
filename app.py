@@ -901,23 +901,28 @@ def resolve_student_detail_period(student_id, filter_key="selected_period", from
     return from_date, to_date, "Selected report period"
 
 
-def get_records_range(from_date, to_date, grade_id=None):
+def get_records_range(from_date, to_date, grade_id=None, section_id=None):
     params = [from_date, to_date]
-    grade_filter = ""
+    filters = []
     if grade_id:
-        grade_filter = " AND g.id=?"
+        filters.append("g.id=?")
         params.append(int(grade_id))
+    if section_id:
+        filters.append("sec.id=?")
+        params.append(int(section_id))
+    extra_filter = (" AND " + " AND ".join(filters)) if filters else ""
     with get_conn() as conn:
         rows = conn.execute(f"""
             SELECT r.*, st.name AS student_name, st.student_number AS student_number, st.name_ar AS student_name_ar,
-                   st.name_en AS student_name_en, g.id AS grade_id, g.name AS grade_name, sec.name AS section_name,
+                   st.name_en AS student_name_en, g.id AS grade_id, g.name AS grade_name,
+                   sec.id AS section_id, sec.name AS section_name,
                    u.full_name AS recorder_name, u.username AS recorder_username
             FROM late_records r
             JOIN students st ON st.id=r.student_id
             JOIN grades g ON g.id=st.grade_id
             JOIN sections sec ON sec.id=st.section_id
             LEFT JOIN users u ON u.id=r.recorded_by
-            WHERE r.late_date BETWEEN ? AND ?{grade_filter}
+            WHERE r.late_date BETWEEN ? AND ?{extra_filter}
             ORDER BY r.late_date, g.sort_order, sec.name, st.name, r.late_time
         """, params).fetchall()
     result = []
@@ -1983,20 +1988,25 @@ def group_period_label(day_text, from_date, to_date):
 
 
 def empty_chart_payload(title):
-    return {"title": title, "labels": ["No Data"], "values": [0], "details": [], "tooltip_lines": ["No data available"]}
+    return {"title": title, "labels": ["No Data"], "values": [0], "details": [], "tooltip_lines": ["No data available"], "group_summaries": [], "student_summary": []}
 
 
-def get_admin_analytics(from_date, to_date):
-    records = get_records_range(from_date, to_date)
+def get_admin_analytics(from_date, to_date, grade_id=None, section_id=None):
+    records = get_records_range(from_date, to_date, grade_id=grade_id, section_id=section_id)
+    period_label = f"{from_date} to {to_date}"
     if not records:
         return {
             "from_date": from_date,
             "to_date": to_date,
+            "grade_id": grade_id,
+            "section_id": section_id,
             "total_records": 0,
             "unique_students": 0,
-            "trend": empty_chart_payload("Weekly / Monthly Late Students Trend"),
+            "trend": empty_chart_payload("Weekly / Monthly Trend"),
             "sections": empty_chart_payload("Most Late/Absent Sections"),
             "students": empty_chart_payload("Most Late Students"),
+            "recent_records": [],
+            "smart_summary": f"No late/absent records found for {period_label}.",
         }
 
     # 1) Weekly/monthly trend: chart shows late/absent record counts.
@@ -2015,7 +2025,7 @@ def get_admin_analytics(from_date, to_date):
         sections[label] = sections.get(label, 0) + 1
         section_details.setdefault(label, []).append(r)
 
-    # 3) Most late students: chart labels do not expose names; hover/details reveal names.
+    # 3) Most late students.
     student_counts = {}
     student_details = {}
     student_display = {}
@@ -2043,8 +2053,28 @@ def get_admin_analytics(from_date, to_date):
             "date": r.get("late_date") or "-",
             "day": r.get("day_name") or "-",
             "time": r.get("late_time") or "-",
-            "recorded_by": r.get("recorder_name") or "Unknown",
+            "recorded_by": r.get("recorder_name") or r.get("recorder_username") or "Unknown",
         }
+
+    def summarize_students_for_details(recs):
+        summary = {}
+        for r in recs:
+            sid = r.get("student_id")
+            key = sid or f"{r.get('student_number')}-{r.get('student_name_en')}"
+            if key not in summary:
+                summary[key] = {
+                    "student_id": sid,
+                    "student_number": r.get("student_number") or "-",
+                    "student_name": r.get("student_name_en") or r.get("student_name") or "-",
+                    "student_name_ar": r.get("student_name_ar") or "-",
+                    "grade": r.get("grade_name") or "-",
+                    "section": r.get("section_name") or "-",
+                    "count": 0,
+                    "dates": [],
+                }
+            summary[key]["count"] += 1
+            summary[key]["dates"].append(f"{r.get('late_date')} {r.get('late_time') or ''}".strip())
+        return sorted(summary.values(), key=lambda x: (-x["count"], x["grade"], x["section"], x["student_name"]))
 
     def build_group_payload(title, counts, details_map, sort_desc=False, limit=None):
         items = list(counts.items())
@@ -2056,30 +2086,31 @@ def get_admin_analytics(from_date, to_date):
         values = [v for _, v in items] or [0]
         details = []
         tooltip_lines = []
+        group_summaries = []
         for label, count in items:
             recs = details_map.get(label, [])
-            names = []
-            seen = set()
+            student_summary = summarize_students_for_details(recs)
+            names = [x["student_name"] for x in student_summary[:6]]
+            tooltip_lines.append(f"{count} records | " + ", ".join(names) + ("..." if len(student_summary) > 6 else ""))
+            group_summaries.append({"label": str(label), "count": count, "students": student_summary})
             for r in recs:
-                nm = r.get("student_name_en") or r.get("student_name") or "-"
-                if nm not in seen:
-                    seen.add(nm)
-                    names.append(nm)
                 details.append(detail_from_record(str(label), r))
-            tooltip_lines.append(f"{count} records | " + ", ".join(names[:8]) + ("..." if len(names) > 8 else ""))
-        return {"title": title, "labels": labels, "values": values, "details": details, "tooltip_lines": tooltip_lines or ["No data available"]}
+        return {"title": title, "labels": labels, "values": values, "details": details, "tooltip_lines": tooltip_lines or ["No data available"], "group_summaries": group_summaries}
 
     def build_students_payload():
         items = sorted(student_counts.items(), key=lambda x: (-x[1], student_display[x[0]]["grade"], student_display[x[0]]["section"], student_display[x[0]]["student_name"]))[:15]
-        labels = [f"Student #{idx}" for idx, _ in enumerate(items, start=1)] or ["No Data"]
-        values = [count for _, count in items] or [0]
+        labels = []
+        values = []
         details = []
         tooltip_lines = []
         student_summary = []
         for idx, (sid, count) in enumerate(items, start=1):
             display = student_display[sid]
-            records_for_student = sorted(student_details.get(sid, []), key=lambda r: r["late_date"])
-            dates = [f"{r['late_date']} {r.get('late_time','')}" for r in records_for_student]
+            readable_label = f"{display['student_name']} ({display['grade']} {display['section']})"
+            labels.append(safe_text(readable_label, 34))
+            values.append(count)
+            records_for_student = sorted(student_details.get(sid, []), key=lambda r: (r["late_date"], r.get("late_time") or ""))
+            dates = [f"{r['late_date']} {r.get('late_time','')}".strip() for r in records_for_student]
             student_summary.append({
                 "rank": idx,
                 "student_id": sid,
@@ -2091,21 +2122,33 @@ def get_admin_analytics(from_date, to_date):
                 "total_late_days": count,
                 "dates": dates,
             })
-            tooltip_lines.append(f"{display['student_name']} | {display['grade']} {display['section']} | {count} late days")
+            tooltip_lines.append(f"{display['student_name']} | {display['grade']} {display['section']} | {count} records")
             for r in records_for_student:
-                details.append(detail_from_record(f"Student #{idx}", r))
-        return {"title": "Most Late Students", "labels": labels, "values": values, "details": details, "tooltip_lines": tooltip_lines or ["No data available"], "student_summary": student_summary}
+                details.append(detail_from_record(display['student_name'], r))
+        return {"title": "Most Late Students", "labels": labels or ["No Data"], "values": values or [0], "details": details, "tooltip_lines": tooltip_lines or ["No data available"], "student_summary": student_summary}
+
+    top_section = sorted(sections.items(), key=lambda x: x[1], reverse=True)[0] if sections else None
+    top_student_sid = sorted(student_counts.items(), key=lambda x: x[1], reverse=True)[0][0] if student_counts else None
+    top_student = student_display.get(top_student_sid, {}) if top_student_sid else {}
+    smart_summary = f"{len(records)} records found from {from_date} to {to_date}."
+    if top_section:
+        smart_summary += f" Highest section: {top_section[0]} with {top_section[1]} records."
+    if top_student_sid:
+        smart_summary += f" Most late student: {top_student.get('student_name', '-')}, {top_student.get('grade', '-')} {top_student.get('section', '-')}, with {student_counts[top_student_sid]} records."
 
     return {
         "from_date": from_date,
         "to_date": to_date,
+        "grade_id": grade_id,
+        "section_id": section_id,
         "total_records": len(records),
         "unique_students": len({r["student_id"] for r in records}),
-        "trend": build_group_payload("Weekly / Monthly Late Students Trend", trend, trend_details),
+        "trend": build_group_payload("Weekly / Monthly Trend", trend, trend_details),
         "sections": build_group_payload("Most Late/Absent Sections", sections, section_details, sort_desc=True, limit=15),
         "students": build_students_payload(),
+        "recent_records": [detail_from_record("Record", r) for r in records[-20:]],
+        "smart_summary": smart_summary,
     }
-
 
 @app.route('/admin/analytics')
 @login_required
@@ -2117,8 +2160,13 @@ def admin_analytics():
     to_date = parse_date_or_today(request.args.get('to_date') or today_iso)
     if from_date > to_date:
         from_date, to_date = to_date, from_date
-    analytics = get_admin_analytics(from_date, to_date)
-    return render_template('admin_analytics.html', analytics=analytics, from_date=from_date, to_date=to_date, today=today_iso)
+    grade_id = request.args.get('grade_id', type=int)
+    section_id = request.args.get('section_id', type=int)
+    with get_conn() as conn:
+        grades = conn.execute("SELECT * FROM grades ORDER BY sort_order, name").fetchall()
+        sections = conn.execute("SELECT s.*, g.name AS grade_name FROM sections s JOIN grades g ON g.id=s.grade_id ORDER BY g.sort_order, s.name").fetchall()
+    analytics = get_admin_analytics(from_date, to_date, grade_id=grade_id, section_id=section_id)
+    return render_template('admin_analytics.html', analytics=analytics, from_date=from_date, to_date=to_date, today=today_iso, grades=grades, sections=sections, selected_grade=grade_id, selected_section=section_id)
 
 
 def add_title(slide, title, subtitle=None):
@@ -2221,7 +2269,9 @@ def export_analytics_pptx(chart_key):
         from_date, to_date = to_date, from_date
     if chart_key not in ("trend", "sections", "students", "all"):
         chart_key = "all"
-    analytics = get_admin_analytics(from_date, to_date)
+    grade_id = request.args.get("grade_id", type=int)
+    section_id = request.args.get("section_id", type=int)
+    analytics = get_admin_analytics(from_date, to_date, grade_id=grade_id, section_id=section_id)
     pptx = build_analytics_pptx(analytics, chart_key)
     suffix = from_date if from_date == to_date else f"{from_date}_to_{to_date}"
     return send_file(

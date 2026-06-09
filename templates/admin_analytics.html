@@ -1,74 +1,94 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="page-head analytics-hero">
+<div class="page-head analytics-hero compact-hero">
   <div>
-    <h1>Admin Analytics Dashboard</h1>
-    <p class="muted">Admin-only live charts by selected period. Use the view selector to switch between bar and pie charts with animated rendering.</p>
+    <h1>Analytics Center</h1>
+    <p class="muted">Admin-only dashboard. Search by period, grade, or exact section, then open any chart group in a pop-up to see students and details.</p>
   </div>
-  <a class="button" href="{{ url_for('export_analytics_pptx', chart_key='all', from_date=from_date, to_date=to_date) }}">Export All Charts PPT</a>
+  <a class="button" href="{{ url_for('export_analytics_pptx', chart_key='all', from_date=from_date, to_date=to_date, grade_id=selected_grade, section_id=selected_section) }}">Export All PPT</a>
 </div>
 
-<form class="filters" method="get">
-  <label>From Date<input type="date" name="from_date" value="{{ from_date }}"></label>
-  <label>To Date<input type="date" name="to_date" value="{{ to_date }}"></label>
-  <label>Chart View
-    <select id="globalChartType">
-      <option value="bar">Animated Bar</option>
-      <option value="pie">Pie Chart</option>
-    </select>
-  </label>
-  <button class="button" type="submit">Analyze Period</button>
+<form class="analytics-filter-card" method="get">
+  <div class="filter-row">
+    <label>From Date<input type="date" name="from_date" value="{{ from_date }}"></label>
+    <label>To Date<input type="date" name="to_date" value="{{ to_date }}"></label>
+    <label>Grade
+      <select name="grade_id" id="gradeFilter">
+        <option value="">All Grades</option>
+        {% for g in grades %}<option value="{{ g.id }}" {% if selected_grade == g.id %}selected{% endif %}>{{ g.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Section
+      <select name="section_id" id="sectionFilter">
+        <option value="">All Sections</option>
+        {% for s in sections %}<option value="{{ s.id }}" data-grade="{{ s.grade_id }}" {% if selected_section == s.id %}selected{% endif %}>{{ s.grade_name }} - {{ s.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Chart Style
+      <select id="globalChartType">
+        <option value="bar">Bar</option>
+        <option value="pie">Pie</option>
+        <option value="doughnut">Doughnut</option>
+      </select>
+    </label>
+    <button class="button" type="submit">Analyze</button>
+    <a class="button ghost" href="{{ url_for('admin_analytics') }}">Reset</a>
+  </div>
 </form>
 
-<div class="analytics-kpis">
-  <div class="kpi-card pulse"><span>Total Late/Absent Records</span><strong>{{ analytics.total_records }}</strong></div>
-  <div class="kpi-card pulse"><span>Students With Records</span><strong>{{ analytics.unique_students }}</strong></div>
-  <div class="kpi-card pulse"><span>Period</span><strong>{{ from_date }} → {{ to_date }}</strong></div>
+<div class="analytics-kpis compact-kpis">
+  <div class="kpi-card"><span>Total Records</span><strong>{{ analytics.total_records }}</strong></div>
+  <div class="kpi-card"><span>Students Involved</span><strong>{{ analytics.unique_students }}</strong></div>
+  <div class="kpi-card"><span>Period</span><strong>{{ from_date }} → {{ to_date }}</strong></div>
 </div>
 
-<div class="insight-strip">
-  <div><strong>Smart Insight</strong><span>Hover over charts to reveal details. Student names are hidden on the chart labels, but visible in tooltips and the detail table.</span></div>
-  <div><strong>Focused View</strong><span>Sections mean exact groups such as 10 ADV 1, 10 GEN 2, 12 ADV 2.</span></div>
+<div class="panel smart-summary">
+  <strong>Smart Summary</strong>
+  <span>{{ analytics.smart_summary }}</span>
 </div>
 
-<div class="chart-grid">
-  <section class="panel chart-card animated-card">
+<div class="analytics-layout">
+  <section class="panel chart-card small-chart-card">
     <div class="chart-head">
-      <h2>1) Weekly / Monthly Comparison</h2>
-      <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='trend', from_date=from_date, to_date=to_date) }}">Export This Chart PPT</a>
+      <div><h2>Weekly / Monthly Trend</h2><p class="muted">Click a bar/slice to see students for that period.</p></div>
+      <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='trend', from_date=from_date, to_date=to_date, grade_id=selected_grade, section_id=selected_section) }}">Export PPT</a>
     </div>
-    <p class="muted">Shows total late/absent records by week for normal periods, and by month for long periods.</p>
-    <canvas id="trendChart" height="140"></canvas>
+    <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+    <div class="quick-list" id="trendQuick"></div>
   </section>
 
-  <section class="panel chart-card animated-card">
+  <section class="panel chart-card small-chart-card">
     <div class="chart-head">
-      <h2>2) Most Late/Absent Sections</h2>
-      <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='sections', from_date=from_date, to_date=to_date) }}">Export This Chart PPT</a>
+      <div><h2>Most Late Sections</h2><p class="muted">Exact sections such as 10 ADV 1 / 12 GEN 2.</p></div>
+      <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='sections', from_date=from_date, to_date=to_date, grade_id=selected_grade, section_id=selected_section) }}">Export PPT</a>
     </div>
-    <p class="muted">Shows exactly which section has the highest number of late/absent records.</p>
-    <canvas id="sectionsChart" height="140"></canvas>
+    <div class="chart-wrap"><canvas id="sectionsChart"></canvas></div>
+    <div class="quick-list" id="sectionsQuick"></div>
   </section>
 
-  <section class="panel chart-card animated-card">
+  <section class="panel chart-card small-chart-card">
     <div class="chart-head">
-      <h2>3) Most Late Students</h2>
-      <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='students', from_date=from_date, to_date=to_date) }}">Export This Chart PPT</a>
+      <div><h2>Most Late Students</h2><p class="muted">Readable names and sections. Click any student for full dates.</p></div>
+      <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='students', from_date=from_date, to_date=to_date, grade_id=selected_grade, section_id=selected_section) }}">Export PPT</a>
     </div>
-    <p class="muted">Chart labels hide names; hover over each item to see the student and section.</p>
-    <canvas id="studentsChart" height="140"></canvas>
+    <div class="chart-wrap"><canvas id="studentsChart"></canvas></div>
+    <div class="quick-list" id="studentsQuick"></div>
   </section>
 </div>
 
 <div class="panel wide featured-panel">
-  <h2>Most Late Students Details</h2>
-  <table class="table compact">
-    <thead><tr><th>Rank</th><th>Student No.</th><th>English Name</th><th>Arabic Name</th><th>Grade</th><th>Section</th><th>Total Late Days</th><th>Late Dates</th></tr></thead>
+  <div class="section-title-row">
+    <h2>Most Late Students Details</h2>
+    <span class="muted">Search-friendly table for the selected filters.</span>
+  </div>
+  <div class="table-toolbar"><input id="studentSearch" type="search" placeholder="Search student name, number, grade, or section..."></div>
+  <table class="table compact" id="mostLateTable">
+    <thead><tr><th>Rank</th><th>Student No.</th><th>English Name</th><th>Arabic Name</th><th>Grade</th><th>Section</th><th>Total</th><th>Action</th></tr></thead>
     <tbody>
       {% for s in analytics.students.student_summary %}
       <tr>
         <td>{{ s.rank }}</td><td>{{ s.student_number }}</td><td>{{ s.student_name }}</td><td>{{ s.student_name_ar }}</td><td>{{ s.grade }}</td><td>{{ s.section }}</td><td>{{ s.total_late_days }}</td>
-        <td>{% for d in s.dates %}<span class="date-chip">{{ d }}</span>{% endfor %}</td>
+        <td><button type="button" class="button tiny" onclick='openStudentModal({{ s|tojson }})'>View Dates</button></td>
       </tr>
       {% else %}<tr><td colspan="8" class="empty">No late students in this period.</td></tr>{% endfor %}
     </tbody>
@@ -76,20 +96,33 @@
 </div>
 
 <div class="panel wide">
-  <h2>Chart Data Summary</h2>
-  <div class="summary-grid">
+  <h2>Readable Chart Summary</h2>
+  <div class="summary-grid readable-summary">
     <div>
       <h3>Trend</h3>
-      <table class="table compact"><thead><tr><th>Period</th><th>Records</th></tr></thead><tbody>{% for label in analytics.trend.labels %}<tr><td>{{ label }}</td><td>{{ analytics.trend.values[loop.index0] }}</td></tr>{% endfor %}</tbody></table>
+      <table class="table compact"><thead><tr><th>Period</th><th>Records</th><th>Students</th></tr></thead><tbody>
+        {% for group in analytics.trend.group_summaries %}<tr><td>{{ group.label }}</td><td>{{ group.count }}</td><td><button class="button tiny" type="button" onclick='openGroupModal("{{ group.label|e }}", {{ group.students|tojson }})'>View Students</button></td></tr>{% else %}<tr><td colspan="3" class="empty">No data</td></tr>{% endfor %}
+      </tbody></table>
     </div>
     <div>
       <h3>Sections</h3>
-      <table class="table compact"><thead><tr><th>Section</th><th>Records</th></tr></thead><tbody>{% for label in analytics.sections.labels %}<tr><td>{{ label }}</td><td>{{ analytics.sections.values[loop.index0] }}</td></tr>{% endfor %}</tbody></table>
+      <table class="table compact"><thead><tr><th>Section</th><th>Records</th><th>Students</th></tr></thead><tbody>
+        {% for group in analytics.sections.group_summaries %}<tr><td>{{ group.label }}</td><td>{{ group.count }}</td><td><button class="button tiny" type="button" onclick='openGroupModal("{{ group.label|e }}", {{ group.students|tojson }})'>View Students</button></td></tr>{% else %}<tr><td colspan="3" class="empty">No data</td></tr>{% endfor %}
+      </tbody></table>
     </div>
     <div>
-      <h3>Most Late Students</h3>
-      <table class="table compact"><thead><tr><th>Student Label</th><th>Late Days</th></tr></thead><tbody>{% for label in analytics.students.labels %}<tr><td>{{ label }}</td><td>{{ analytics.students.values[loop.index0] }}</td></tr>{% endfor %}</tbody></table>
+      <h3>Students</h3>
+      <table class="table compact"><thead><tr><th>Student</th><th>Section</th><th>Total</th></tr></thead><tbody>
+        {% for s in analytics.students.student_summary[:10] %}<tr><td>{{ s.student_name }}</td><td>{{ s.grade }} {{ s.section }}</td><td>{{ s.total_late_days }}</td></tr>{% else %}<tr><td colspan="3" class="empty">No data</td></tr>{% endfor %}
+      </tbody></table>
     </div>
+  </div>
+</div>
+
+<div id="analyticsModal" class="modal-overlay" onclick="closeAnalyticsModal(event)">
+  <div class="modal-card large-modal" onclick="event.stopPropagation()">
+    <div class="modal-head"><h2 id="modalTitle">Details</h2><button class="icon-button" onclick="hideAnalyticsModal()">×</button></div>
+    <div id="modalBody"></div>
   </div>
 </div>
 
@@ -102,42 +135,75 @@ const chartStore = {};
 
 function buildDataset(payload, type){
   const base = { label: 'Late/Absent Records', data: payload.values, borderWidth: 1 };
-  if(type === 'pie' || type === 'doughnut'){
-    return [{...base, hoverOffset: 12}];
-  }
-  return [{...base, borderRadius: 10}];
+  if(type === 'pie' || type === 'doughnut') return [{...base, hoverOffset: 8}];
+  return [{...base, borderRadius: 7, maxBarThickness: 42}];
 }
 function makeChart(canvasId, payload, title, type='bar') {
   const ctx = document.getElementById(canvasId);
   if(chartStore[canvasId]) chartStore[canvasId].destroy();
   chartStore[canvasId] = new Chart(ctx, {
-    type: type,
+    type,
     data: { labels: payload.labels, datasets: buildDataset(payload, type) },
     options: {
       responsive: true,
-      animation: { duration: 950, easing: 'easeOutQuart' },
-      plugins: {
-        legend: { position: 'top' },
-        title: { display: true, text: title },
-        tooltip: {
-          callbacks: {
-            afterLabel: function(context) {
-              const line = payload.tooltip_lines && payload.tooltip_lines[context.dataIndex];
-              return line ? line : '';
-            }
-          }
-        }
+      maintainAspectRatio: false,
+      animation: { duration: 650, easing: 'easeOutQuart' },
+      onClick: (evt, elements) => {
+        if(!elements.length) return;
+        const idx = elements[0].index;
+        if(payload.group_summaries && payload.group_summaries[idx]) openGroupModal(payload.group_summaries[idx].label, payload.group_summaries[idx].students);
+        else if(payload.student_summary && payload.student_summary[idx]) openStudentModal(payload.student_summary[idx]);
       },
-      scales: (type === 'pie' || type === 'doughnut') ? {} : { y: { beginAtZero: true, ticks: { precision: 0 } } }
+      plugins: {
+        legend: { display: type !== 'bar', position: 'bottom' },
+        title: { display: false },
+        tooltip: { callbacks: { afterLabel: ctx => (payload.tooltip_lines && payload.tooltip_lines[ctx.dataIndex]) || '' } }
+      },
+      scales: (type === 'pie' || type === 'doughnut') ? {} : { y: { beginAtZero: true, ticks: { precision: 0 } }, x: { ticks: { maxRotation: 25, minRotation: 0 } } }
     }
   });
 }
 function renderAll(type){
-  makeChart('trendChart', trend, 'Weekly / Monthly Late Students Trend', type);
-  makeChart('sectionsChart', sections, 'Most Late/Absent Sections', type);
-  makeChart('studentsChart', students, 'Most Late Students', type);
+  makeChart('trendChart', trend, 'Trend', type);
+  makeChart('sectionsChart', sections, 'Sections', type);
+  makeChart('studentsChart', students, 'Students', type);
+  renderQuickList('trendQuick', trend);
+  renderQuickList('sectionsQuick', sections);
+  renderQuickList('studentsQuick', students, true);
 }
-renderAll('bar');
+function renderQuickList(id, payload, isStudents=false){
+  const box = document.getElementById(id);
+  const html = (isStudents ? (payload.student_summary || []).slice(0,5).map(s => `<button type="button" onclick='openStudentModal(${JSON.stringify(s)})'><b>${s.student_name}</b><span>${s.grade} ${s.section} • ${s.total_late_days}</span></button>`) : (payload.group_summaries || []).slice(0,5).map(g => `<button type="button" onclick='openGroupModal(${JSON.stringify(g.label)}, ${JSON.stringify(g.students)})'><b>${g.label}</b><span>${g.count} records • ${g.students.length} students</span></button>`)).join('');
+  box.innerHTML = html || '<span class="muted">No data</span>';
+}
+function openGroupModal(title, students){
+  document.getElementById('modalTitle').textContent = title + ' — Students';
+  const rows = (students || []).map(s => `<tr><td>${s.student_number}</td><td>${s.student_name}</td><td>${s.student_name_ar}</td><td>${s.grade}</td><td>${s.section}</td><td>${s.count}</td><td>${(s.dates||[]).map(d=>`<span class="date-chip">${d}</span>`).join(' ')}</td></tr>`).join('');
+  document.getElementById('modalBody').innerHTML = `<table class="table compact"><thead><tr><th>No.</th><th>English Name</th><th>Arabic Name</th><th>Grade</th><th>Section</th><th>Total</th><th>Dates</th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="empty">No students</td></tr>'}</tbody></table>`;
+  showAnalyticsModal();
+}
+function openStudentModal(s){
+  document.getElementById('modalTitle').textContent = `${s.student_name} — Late Details`;
+  const dates = (s.dates || []).map(d => `<span class="date-chip large-chip">${d}</span>`).join(' ');
+  document.getElementById('modalBody').innerHTML = `<div class="student-detail-card"><div><b>Student No.</b><span>${s.student_number}</span></div><div><b>Arabic Name</b><span>${s.student_name_ar}</span></div><div><b>Grade</b><span>${s.grade}</span></div><div><b>Section</b><span>${s.section}</span></div><div><b>Total Records</b><span>${s.total_late_days}</span></div></div><h3>Late Dates</h3><div class="date-chip-wrap">${dates || '<span class="empty">No dates</span>'}</div>`;
+  showAnalyticsModal();
+}
+function showAnalyticsModal(){ document.getElementById('analyticsModal').classList.add('show'); }
+function hideAnalyticsModal(){ document.getElementById('analyticsModal').classList.remove('show'); }
+function closeAnalyticsModal(e){ if(e.target.id === 'analyticsModal') hideAnalyticsModal(); }
+
 document.getElementById('globalChartType').addEventListener('change', function(){ renderAll(this.value); });
+document.getElementById('gradeFilter').addEventListener('change', function(){
+  const grade = this.value;
+  const sectionSelect = document.getElementById('sectionFilter');
+  [...sectionSelect.options].forEach(opt => { if(!opt.value) return; opt.hidden = grade && opt.dataset.grade !== grade; });
+  if(sectionSelect.selectedOptions[0] && sectionSelect.selectedOptions[0].hidden) sectionSelect.value = '';
+});
+document.getElementById('studentSearch').addEventListener('input', function(){
+  const q = this.value.toLowerCase();
+  document.querySelectorAll('#mostLateTable tbody tr').forEach(tr => { tr.style.display = tr.innerText.toLowerCase().includes(q) ? '' : 'none'; });
+});
+renderAll('bar');
+document.getElementById('gradeFilter').dispatchEvent(new Event('change'));
 </script>
 {% endblock %}
