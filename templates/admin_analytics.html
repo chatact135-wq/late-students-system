@@ -3,7 +3,7 @@
 <div class="page-head">
   <div>
     <h1>Admin Analytics Dashboard</h1>
-    <p class="muted">Admin-only live charts by selected period. Charts show counts only; exported PowerPoint includes detailed student tables under the charts.</p>
+    <p class="muted">Admin-only live charts by selected period. The charts show numbers only, while hover/details and PowerPoint exports include full student details.</p>
   </div>
   <a class="button" href="{{ url_for('export_analytics_pptx', chart_key='all', from_date=from_date, to_date=to_date) }}">Export All Charts PPT</a>
 </div>
@@ -16,7 +16,7 @@
 
 <div class="analytics-kpis">
   <div class="kpi-card"><span>Total Late/Absent Records</span><strong>{{ analytics.total_records }}</strong></div>
-  <div class="kpi-card"><span>Unique Students</span><strong>{{ analytics.unique_students }}</strong></div>
+  <div class="kpi-card"><span>Students With Records</span><strong>{{ analytics.unique_students }}</strong></div>
   <div class="kpi-card"><span>Period</span><strong>{{ from_date }} → {{ to_date }}</strong></div>
 </div>
 
@@ -26,7 +26,7 @@
       <h2>1) Weekly / Monthly Comparison</h2>
       <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='trend', from_date=from_date, to_date=to_date) }}">Export This Chart PPT</a>
     </div>
-    <p class="muted">Shows student count trend by week for normal periods, and by month for long periods.</p>
+    <p class="muted">Shows total late/absent records by week for normal periods, and by month for long periods.</p>
     <canvas id="trendChart" height="140"></canvas>
   </section>
 
@@ -41,12 +41,27 @@
 
   <section class="panel chart-card">
     <div class="chart-head">
-      <h2>3) Most Late/Absent Grades</h2>
-      <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='grades', from_date=from_date, to_date=to_date) }}">Export This Chart PPT</a>
+      <h2>3) Most Late Students</h2>
+      <a class="button small" href="{{ url_for('export_analytics_pptx', chart_key='students', from_date=from_date, to_date=to_date) }}">Export This Chart PPT</a>
     </div>
-    <p class="muted">Grade-level comparison across Grade 9, 10, 11, and 12.</p>
-    <canvas id="gradesChart" height="140"></canvas>
+    <p class="muted">Chart labels hide names; hover over each bar to see the student. Full details are listed below and in the PowerPoint export.</p>
+    <canvas id="studentsChart" height="140"></canvas>
   </section>
+</div>
+
+<div class="panel wide">
+  <h2>Most Late Students Details</h2>
+  <table class="table compact">
+    <thead><tr><th>Rank</th><th>Student No.</th><th>English Name</th><th>Arabic Name</th><th>Grade</th><th>Section</th><th>Total Late Days</th><th>Late Dates</th></tr></thead>
+    <tbody>
+      {% for s in analytics.students.student_summary %}
+      <tr>
+        <td>{{ s.rank }}</td><td>{{ s.student_number }}</td><td>{{ s.student_name }}</td><td>{{ s.student_name_ar }}</td><td>{{ s.grade }}</td><td>{{ s.section }}</td><td>{{ s.total_late_days }}</td>
+        <td>{% for d in s.dates %}<span class="date-chip">{{ d }}</span>{% endfor %}</td>
+      </tr>
+      {% else %}<tr><td colspan="8" class="empty">No late students in this period.</td></tr>{% endfor %}
+    </tbody>
+  </table>
 </div>
 
 <div class="panel wide">
@@ -54,15 +69,15 @@
   <div class="summary-grid">
     <div>
       <h3>Trend</h3>
-      <table class="table compact"><thead><tr><th>Period</th><th>Records</th><th>Unique Students</th></tr></thead><tbody>{% for label in analytics.trend.labels %}<tr><td>{{ label }}</td><td>{{ analytics.trend.values[loop.index0] }}</td><td>{{ analytics.trend.unique_students[loop.index0] }}</td></tr>{% endfor %}</tbody></table>
+      <table class="table compact"><thead><tr><th>Period</th><th>Records</th></tr></thead><tbody>{% for label in analytics.trend.labels %}<tr><td>{{ label }}</td><td>{{ analytics.trend.values[loop.index0] }}</td></tr>{% endfor %}</tbody></table>
     </div>
     <div>
       <h3>Sections</h3>
-      <table class="table compact"><thead><tr><th>Section</th><th>Records</th><th>Unique Students</th></tr></thead><tbody>{% for label in analytics.sections.labels %}<tr><td>{{ label }}</td><td>{{ analytics.sections.values[loop.index0] }}</td><td>{{ analytics.sections.unique_students[loop.index0] }}</td></tr>{% endfor %}</tbody></table>
+      <table class="table compact"><thead><tr><th>Section</th><th>Records</th></tr></thead><tbody>{% for label in analytics.sections.labels %}<tr><td>{{ label }}</td><td>{{ analytics.sections.values[loop.index0] }}</td></tr>{% endfor %}</tbody></table>
     </div>
     <div>
-      <h3>Grades</h3>
-      <table class="table compact"><thead><tr><th>Grade</th><th>Records</th><th>Unique Students</th></tr></thead><tbody>{% for label in analytics.grades.labels %}<tr><td>{{ label }}</td><td>{{ analytics.grades.values[loop.index0] }}</td><td>{{ analytics.grades.unique_students[loop.index0] }}</td></tr>{% endfor %}</tbody></table>
+      <h3>Most Late Students</h3>
+      <table class="table compact"><thead><tr><th>Student Label</th><th>Late Days</th></tr></thead><tbody>{% for label in analytics.students.labels %}<tr><td>{{ label }}</td><td>{{ analytics.students.values[loop.index0] }}</td></tr>{% endfor %}</tbody></table>
     </div>
   </div>
 </div>
@@ -71,7 +86,7 @@
 <script>
 const trend = {{ analytics.trend|tojson }};
 const sections = {{ analytics.sections|tojson }};
-const grades = {{ analytics.grades|tojson }};
+const students = {{ analytics.students|tojson }};
 
 function makeBarChart(canvasId, payload, title) {
   const ctx = document.getElementById(canvasId);
@@ -80,19 +95,29 @@ function makeBarChart(canvasId, payload, title) {
     data: {
       labels: payload.labels,
       datasets: [
-        { label: 'Late/Absent Records', data: payload.values, borderWidth: 1 },
-        { label: 'Unique Students', data: payload.unique_students, borderWidth: 1 }
+        { label: 'Late/Absent Records', data: payload.values, borderWidth: 1 }
       ]
     },
     options: {
       responsive: true,
-      plugins: { legend: { position: 'top' }, title: { display: true, text: title } },
+      plugins: {
+        legend: { position: 'top' },
+        title: { display: true, text: title },
+        tooltip: {
+          callbacks: {
+            afterLabel: function(context) {
+              const line = payload.tooltip_lines && payload.tooltip_lines[context.dataIndex];
+              return line ? line : '';
+            }
+          }
+        }
+      },
       scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
     }
   });
 }
 makeBarChart('trendChart', trend, 'Weekly / Monthly Late Students Trend');
 makeBarChart('sectionsChart', sections, 'Most Late/Absent Sections');
-makeBarChart('gradesChart', grades, 'Most Late/Absent Grades');
+makeBarChart('studentsChart', students, 'Most Late Students');
 </script>
 {% endblock %}

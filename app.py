@@ -52,6 +52,17 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
 
 DEFAULT_ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+UAE_TIME_OFFSET = timedelta(hours=4)
+
+
+def now_uae():
+    """Return current UAE time as a naive datetime for consistent display/storage."""
+    return datetime.utcnow() + UAE_TIME_OFFSET
+
+
+def uae_now_strings():
+    now = now_uae()
+    return now, now.strftime("%H:%M:%S"), now.isoformat(timespec="seconds")
 
 OFFICIAL_GRADE_ORDER = {
     "Grade 9": 9,
@@ -473,14 +484,14 @@ def mark_late(student_id):
     selected_date = parse_date_or_today(request.form.get("date"))
     selected_grade = request.form.get("grade_id", type=int)
     selected_section = request.form.get("section_id", type=int)
-    now = datetime.now()
+    now, late_time_uae, created_at_uae = uae_now_strings()
     with get_conn() as conn:
         s = conn.execute("SELECT grade_id, section_id FROM students WHERE id=?", (student_id,)).fetchone()
         # The late_date can be a previous calendar date, while late_time records the real entry time.
         conn.execute("""
             INSERT OR REPLACE INTO late_records(student_id, late_date, late_time, recorded_by, created_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (student_id, selected_date, now.strftime("%H:%M:%S"), session["user_id"], now.isoformat(timespec="seconds")))
+        """, (student_id, selected_date, late_time_uae, session["user_id"], created_at_uae))
         conn.commit()
     flash(f"Late record saved for {selected_date}.", "success")
     return redirect(url_for("dashboard", grade_id=selected_grade or s["grade_id"], section_id=selected_section or s["section_id"], date=selected_date))
@@ -671,6 +682,40 @@ def report():
     start = (page - 1) * per_page
     records = records_all[start:start + per_page]
     return render_template("report.html", records=records, from_date=from_date, to_date=to_date, today=today_iso, page=page, per_page=per_page, total_pages=total_pages, total_records=total_records, start_index=start)
+
+
+@app.route("/student/<int:student_id>/late-details")
+@login_required
+def student_late_details(student_id):
+    today_iso = date.today().isoformat()
+    from_date = parse_date_or_today(request.args.get("from_date") or "1900-01-01")
+    to_date = parse_date_or_today(request.args.get("to_date") or today_iso)
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+    with get_conn() as conn:
+        student = conn.execute("""
+            SELECT s.*, g.name AS grade_name, sec.name AS section_name
+            FROM students s
+            JOIN grades g ON g.id=s.grade_id
+            JOIN sections sec ON sec.id=s.section_id
+            WHERE s.id=?
+        """, (student_id,)).fetchone()
+        rows = conn.execute("""
+            SELECT r.*, u.full_name AS recorder_name, u.username AS recorder_username
+            FROM late_records r
+            LEFT JOIN users u ON u.id=r.recorded_by
+            WHERE r.student_id=? AND r.late_date BETWEEN ? AND ?
+            ORDER BY r.late_date DESC, r.late_time DESC
+        """, (student_id, from_date, to_date)).fetchall()
+    if not student:
+        flash("Student not found.", "danger")
+        return redirect(url_for("report", from_date=from_date, to_date=to_date))
+    records = []
+    for r in rows:
+        item = dict(r)
+        item["day_name"] = datetime.strptime(item["late_date"], "%Y-%m-%d").strftime("%A")
+        records.append(item)
+    return render_template("student_details.html", student=dict(student), records=records, from_date=from_date, to_date=to_date, total_days=len(records))
 
 
 def get_records_range(from_date, to_date, grade_id=None):
@@ -1755,7 +1800,7 @@ def group_period_label(day_text, from_date, to_date):
 
 
 def empty_chart_payload(title):
-    return {"title": title, "labels": ["No Data"], "values": [0], "unique_students": [0], "details": []}
+    return {"title": title, "labels": ["No Data"], "values": [0], "details": [], "tooltip_lines": ["No data available"]}
 
 
 def get_admin_analytics(from_date, to_date):
@@ -1768,76 +1813,114 @@ def get_admin_analytics(from_date, to_date):
             "unique_students": 0,
             "trend": empty_chart_payload("Weekly / Monthly Late Students Trend"),
             "sections": empty_chart_payload("Most Late/Absent Sections"),
-            "grades": empty_chart_payload("Most Late/Absent Grades"),
+            "students": empty_chart_payload("Most Late Students"),
         }
 
-    # 1) Weekly/monthly trend: chart shows counts only, no student names.
+    # 1) Weekly/monthly trend: chart shows late/absent record counts.
     trend = {}
-    trend_students = {}
     trend_details = {}
     for r in records:
         label = group_period_label(r["late_date"], from_date, to_date)
         trend[label] = trend.get(label, 0) + 1
-        trend_students.setdefault(label, set()).add(r["student_id"])
         trend_details.setdefault(label, []).append(r)
 
-    # 2) Sections: section means exact division like 10 ADV 1 / 12 GEN 2.
+    # 2) Sections: exact division like 10 ADV 1 / 12 GEN 2.
     sections = {}
-    section_students = {}
     section_details = {}
     for r in records:
         label = f"{r['grade_name']} - {r['section_name']}"
         sections[label] = sections.get(label, 0) + 1
-        section_students.setdefault(label, set()).add(r["student_id"])
         section_details.setdefault(label, []).append(r)
 
-    # 3) Grades: grade-level comparison.
-    grades = {}
-    grade_students = {}
-    grade_details = {}
+    # 3) Most late students: chart labels do not expose names; hover/details reveal names.
+    student_counts = {}
+    student_details = {}
+    student_display = {}
     for r in records:
-        label = r["grade_name"]
-        grades[label] = grades.get(label, 0) + 1
-        grade_students.setdefault(label, set()).add(r["student_id"])
-        grade_details.setdefault(label, []).append(r)
+        sid = r["student_id"]
+        student_counts[sid] = student_counts.get(sid, 0) + 1
+        student_details.setdefault(sid, []).append(r)
+        student_display[sid] = {
+            "student_number": r.get("student_number") or "-",
+            "student_name": r.get("student_name_en") or r.get("student_name") or "-",
+            "student_name_ar": r.get("student_name_ar") or "-",
+            "grade": r.get("grade_name") or "-",
+            "section": r.get("section_name") or "-",
+        }
 
-    def build_payload(title, counts, students_map, details_map, sort_desc=False, limit=None):
+    def detail_from_record(group, r):
+        return {
+            "group": group,
+            "student_id": r.get("student_id"),
+            "student_number": r.get("student_number") or "-",
+            "student_name": r.get("student_name_en") or r.get("student_name") or "-",
+            "student_name_ar": r.get("student_name_ar") or "-",
+            "grade": r.get("grade_name") or "-",
+            "section": r.get("section_name") or "-",
+            "date": r.get("late_date") or "-",
+            "day": r.get("day_name") or "-",
+            "time": r.get("late_time") or "-",
+            "recorded_by": r.get("recorder_name") or "Unknown",
+        }
+
+    def build_group_payload(title, counts, details_map, sort_desc=False, limit=None):
         items = list(counts.items())
         if sort_desc:
             items.sort(key=lambda x: (-x[1], x[0]))
-        else:
-            # Trend labels are already created in date order from records; keep insertion order.
-            pass
         if limit:
             items = items[:limit]
-        labels = [k for k, _ in items] or ["No Data"]
+        labels = [str(k) for k, _ in items] or ["No Data"]
         values = [v for _, v in items] or [0]
-        uniques = [len(students_map.get(k, set())) for k, _ in items] or [0]
         details = []
-        for label, _ in items:
-            for r in details_map.get(label, []):
-                details.append({
-                    "group": label,
-                    "student_number": r.get("student_number") or "-",
-                    "student_name": r.get("student_name_en") or r.get("student_name") or "-",
-                    "student_name_ar": r.get("student_name_ar") or "-",
-                    "grade": r.get("grade_name") or "-",
-                    "section": r.get("section_name") or "-",
-                    "date": r.get("late_date") or "-",
-                    "day": r.get("day_name") or "-",
-                    "time": r.get("late_time") or "-",
-                    "recorded_by": r.get("recorder_name") or "Unknown",
-                })
-        return {"title": title, "labels": labels, "values": values, "unique_students": uniques, "details": details}
+        tooltip_lines = []
+        for label, count in items:
+            recs = details_map.get(label, [])
+            names = []
+            seen = set()
+            for r in recs:
+                nm = r.get("student_name_en") or r.get("student_name") or "-"
+                if nm not in seen:
+                    seen.add(nm)
+                    names.append(nm)
+                details.append(detail_from_record(str(label), r))
+            tooltip_lines.append(f"{count} records | " + ", ".join(names[:8]) + ("..." if len(names) > 8 else ""))
+        return {"title": title, "labels": labels, "values": values, "details": details, "tooltip_lines": tooltip_lines or ["No data available"]}
+
+    def build_students_payload():
+        items = sorted(student_counts.items(), key=lambda x: (-x[1], student_display[x[0]]["grade"], student_display[x[0]]["section"], student_display[x[0]]["student_name"]))[:15]
+        labels = [f"Student #{idx}" for idx, _ in enumerate(items, start=1)] or ["No Data"]
+        values = [count for _, count in items] or [0]
+        details = []
+        tooltip_lines = []
+        student_summary = []
+        for idx, (sid, count) in enumerate(items, start=1):
+            display = student_display[sid]
+            records_for_student = sorted(student_details.get(sid, []), key=lambda r: r["late_date"])
+            dates = [f"{r['late_date']} {r.get('late_time','')}" for r in records_for_student]
+            student_summary.append({
+                "rank": idx,
+                "student_id": sid,
+                "student_number": display["student_number"],
+                "student_name": display["student_name"],
+                "student_name_ar": display["student_name_ar"],
+                "grade": display["grade"],
+                "section": display["section"],
+                "total_late_days": count,
+                "dates": dates,
+            })
+            tooltip_lines.append(f"{display['student_name']} | {display['grade']} {display['section']} | {count} late days")
+            for r in records_for_student:
+                details.append(detail_from_record(f"Student #{idx}", r))
+        return {"title": "Most Late Students", "labels": labels, "values": values, "details": details, "tooltip_lines": tooltip_lines or ["No data available"], "student_summary": student_summary}
 
     return {
         "from_date": from_date,
         "to_date": to_date,
         "total_records": len(records),
         "unique_students": len({r["student_id"] for r in records}),
-        "trend": build_payload("Weekly / Monthly Late Students Trend", trend, trend_students, trend_details),
-        "sections": build_payload("Most Late/Absent Sections", sections, section_students, section_details, sort_desc=True, limit=15),
-        "grades": build_payload("Most Late/Absent Grades", grades, grade_students, grade_details, sort_desc=True),
+        "trend": build_group_payload("Weekly / Monthly Late Students Trend", trend, trend_details),
+        "sections": build_group_payload("Most Late/Absent Sections", sections, section_details, sort_desc=True, limit=15),
+        "students": build_students_payload(),
     }
 
 
@@ -1872,7 +1955,6 @@ def add_ppt_chart_slide(prs, payload, from_date, to_date):
     chart_data = CategoryChartData()
     chart_data.categories = [safe_text(x, 40) for x in payload['labels']]
     chart_data.add_series('Late/Absent Records', payload['values'])
-    chart_data.add_series('Unique Students', payload['unique_students'])
     chart = slide.shapes.add_chart(
         XL_CHART_TYPE.COLUMN_CLUSTERED,
         Inches(0.55), Inches(0.95), Inches(12.1), Inches(3.6),
@@ -1927,10 +2009,10 @@ def build_analytics_pptx(analytics, chart_key):
 
     title_slide = prs.slides.add_slide(prs.slide_layouts[0])
     title_slide.shapes.title.text = "Attendance Analytics Dashboard"
-    title_slide.placeholders[1].text = f"Period: {analytics['from_date']} to {analytics['to_date']}\nTotal records: {analytics['total_records']} | Unique students: {analytics['unique_students']}"
+    title_slide.placeholders[1].text = f"Period: {analytics['from_date']} to {analytics['to_date']}\nTotal records: {analytics['total_records']} | Students with records: {analytics['unique_students']}"
 
-    chart_keys = [chart_key] if chart_key != "all" else ["trend", "sections", "grades"]
-    chart_names = {"trend": "Weekly / Monthly Trend", "sections": "Top Sections", "grades": "Top Grades"}
+    chart_keys = [chart_key] if chart_key != "all" else ["trend", "sections", "students"]
+    chart_names = {"trend": "Weekly / Monthly Trend", "sections": "Top Sections", "students": "Most Late Students"}
     for key in chart_keys:
         if key not in analytics:
             continue
@@ -1954,7 +2036,7 @@ def export_analytics_pptx(chart_key):
     to_date = parse_date_or_today(request.args.get('to_date') or today_iso)
     if from_date > to_date:
         from_date, to_date = to_date, from_date
-    if chart_key not in ("trend", "sections", "grades", "all"):
+    if chart_key not in ("trend", "sections", "students", "all"):
         chart_key = "all"
     analytics = get_admin_analytics(from_date, to_date)
     pptx = build_analytics_pptx(analytics, chart_key)
